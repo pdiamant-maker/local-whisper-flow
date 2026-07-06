@@ -131,6 +131,7 @@ tray_icon = None
 shutdown_event = threading.Event()
 current_status = "starting"
 show_idle_overlay_until = 0.0
+last_metrics_text = ""  # Populated after each dictation when SHOW_METRICS is on.
 _dll_directory_handles = []
 
 TRAY_COLORS = {
@@ -552,6 +553,11 @@ def start_floating_overlay() -> None:
                 canvas.create_line(x, bar_mid - half, x, bar_mid + half, fill=color, width=6, capstyle=tk.ROUND)
             canvas.create_text(88, 28, text=label, fill="#FFFFFF", font=("Segoe UI", 11, "bold"))
             canvas.create_text(88, 48, text="Flow", fill="#AAB6C4", font=("Segoe UI", 9))
+            if SHOW_METRICS and last_metrics_text and status in ("idle", "processing"):
+                canvas.create_text(
+                    width // 2, height - 7,
+                    text=last_metrics_text, fill="#7A8896", font=("Segoe UI", 7),
+                )
 
         def poll() -> None:
             status = current_status
@@ -895,7 +901,7 @@ def paste_text(text: str) -> None:
 
 def process_recording() -> None:
     """Save, transcribe, polish, and paste the captured recording."""
-    global is_processing
+    global is_processing, last_metrics_text
 
     wav_path: Optional[Path] = None
     status_after_processing = "idle"
@@ -924,7 +930,12 @@ def process_recording() -> None:
 
         log(f"Final text ({ollama_seconds:.2f}s): {clean_text}")
         paste_text(clean_text)
-        log(f"Total processing time: {time.perf_counter() - started_at:.2f}s")
+        total_seconds = time.perf_counter() - started_at
+        log(f"Total processing time: {total_seconds:.2f}s")
+        if SHOW_METRICS:
+            last_metrics_text = (
+                f"total {total_seconds:.1f}s  ·  whisper {transcribe_seconds:.1f}  ·  llm {ollama_seconds:.1f}"
+            )
 
     except Exception as exc:
         status_after_processing = "error"
