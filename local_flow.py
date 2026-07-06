@@ -430,18 +430,34 @@ def configure_cuda_dll_search() -> None:
         log(f"Using CUDA DLL directory: {cuda_dir}")
 
 
-def make_tray_image(status: str):
-    """Create a tiny colored tray icon for the current status."""
+_TRAY_ENERGY = {
+    "recording": 1.0,
+    "processing": 0.55,
+    "starting": 0.35,
+    "idle": 0.18,
+    "error": 0.10,
+}
+
+
+def make_tray_image(status: str, phase: float = 0.0):
+    """Create a tiny animated equalizer tray icon for the current status.
+
+    `phase` advances over time to animate the bars; call with a rising value.
+    """
     if not TRAY_IMPORTS_AVAILABLE:
         return None
 
     color = TRAY_COLORS.get(status, TRAY_COLORS["idle"])
+    energy = _TRAY_ENERGY.get(status, _TRAY_ENERGY["idle"])
+    speed = 9.0 if status == "recording" else 2.5
+
     image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    draw.ellipse((6, 6, 58, 58), fill=color, outline=(255, 255, 255), width=3)
-    draw.rectangle((29, 18, 35, 38), fill=(255, 255, 255))
-    draw.arc((22, 28, 42, 48), 0, 180, fill=(255, 255, 255), width=4)
-    draw.line((32, 46, 32, 54), fill=(255, 255, 255), width=4)
+    mid = 32
+    for i, x in enumerate((14, 26, 38, 50)):
+        wave = 0.5 + 0.5 * math.sin(phase * speed + i * 1.9)
+        half = max(4, int(24 * energy * (0.35 + 0.65 * wave)))
+        draw.line((x, mid - half, x, mid + half), fill=color, width=8)
     return image
 
 
@@ -613,6 +629,19 @@ def start_tray_icon() -> None:
     tray_icon = pystray.Icon("Local Flow", make_tray_image(current_status), "Local Flow", menu)
     thread = threading.Thread(target=tray_icon.run, daemon=True)
     thread.start()
+
+    def animate_tray() -> None:
+        phase = 0.0
+        while not shutdown_event.is_set():
+            if tray_icon is not None:
+                try:
+                    tray_icon.icon = make_tray_image(current_status, phase)
+                except Exception:
+                    pass
+            phase += 0.15
+            time.sleep(0.12)
+
+    threading.Thread(target=animate_tray, daemon=True).start()
 
 
 def load_whisper_model() -> "FasterWhisperModel":
