@@ -71,11 +71,11 @@ after each dictation, e.g. `total 0.7s · whisper 0.3 · llm 0.1`.
 
 | Stage | GPU (CUDA) | CPU |
 |---|---|---|
-| Transcribe (Whisper) | ~0.3s (large-v3-turbo) | ~3–4s (use `base.en`/`small.en`) |
-| Refine (Ollama) | ~0.1s (7b) | slower (use `3b`) |
-| **End-to-end** | **~0.7s** | **a few seconds** |
+| Transcribe (Whisper) | ~0.32s (large-v3-turbo) | ~3–4s (use `base.en`/`small.en`) |
+| Refine (Ollama) | ~0.12s (3b); a bit more on 7b | slower (use `3b`) |
+| **End-to-end** | **~0.65s** | **a few seconds** |
 
-*GPU numbers measured on the author's machine. Your times will vary.*
+*GPU numbers measured on the author's machine (NVIDIA CUDA, large-v3-turbo). Your times will vary.*
 
 For usable CPU latency, prefer the `base.en` or `small.en` Whisper model and the
 `qwen2.5:3b-instruct` cleanup model.

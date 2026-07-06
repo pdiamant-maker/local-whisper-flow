@@ -20,3 +20,6 @@ local_flow_launcher.pyw
 
 # Impeccable working dir
 .impeccable/
+
+# Internal planning docs (kept local, not published)
+docs/superpowers/
