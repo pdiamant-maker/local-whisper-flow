@@ -17,3 +17,6 @@ __pycache__/
 openwhispr-ollama-setup-prompt.md
 summary.md
 local_flow_launcher.pyw
+
+# Impeccable working dir
+.impeccable/
