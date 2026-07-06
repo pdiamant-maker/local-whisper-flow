@@ -1,0 +1,19 @@
+# Runtime logs (contain dictated transcripts — never commit)
+local_flow.log
+local_flow_launcher.log
+
+# Temporary audio captures
+local_flow_*.wav
+
+# Timestamped backups
+*.bak-*
+*.bak
+
+# Python
+__pycache__/
+*.pyc
+
+# Internal / working notes (not part of the public repo)
+openwhispr-ollama-setup-prompt.md
+summary.md
+local_flow_launcher.pyw
