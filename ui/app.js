@@ -30,9 +30,7 @@
 
     var gear = document.getElementById("settings-gear");
     if (gear) {
-      gear.addEventListener("click", function () {
-        callApi("open_settings_placeholder");
-      });
+      gear.addEventListener("click", openSettingsView);
     }
   }
 
@@ -304,6 +302,277 @@
     };
   }
 
+  // ---- Settings ----
+  var KEY_NAME_MAP = {
+    " ": "<space>", "Escape": "<esc>", "Tab": "<tab>", "Enter": "<enter>",
+    "Backspace": "<backspace>", "Delete": "<delete>", "ArrowUp": "<up>",
+    "ArrowDown": "<down>", "ArrowLeft": "<left>", "ArrowRight": "<right>",
+    "Home": "<home>", "End": "<end>", "PageUp": "<page_up>", "PageDown": "<page_down>",
+    "F1": "<f1>", "F2": "<f2>", "F3": "<f3>", "F4": "<f4>", "F5": "<f5>", "F6": "<f6>",
+    "F7": "<f7>", "F8": "<f8>", "F9": "<f9>", "F10": "<f10>", "F11": "<f11>", "F12": "<f12>"
+  };
+
+  function keyToToken(e) {
+    if (e.key.length === 1) return e.key.toLowerCase();
+    return KEY_NAME_MAP[e.key] || null;
+  }
+
+  function formatHotkeyDisplay(combo) {
+    if (!combo) return "Not set";
+    return combo.replace(/<ctrl>/g, "Ctrl").replace(/<shift>/g, "Shift")
+      .replace(/<alt>/g, "Alt").replace(/<cmd>/g, "Win").replace(/</g, "").replace(/>/g, "")
+      .split("+").join(" + ");
+  }
+
+  function startHotkeyCapture(button, onCapture) {
+    button.classList.add("capturing");
+    button.textContent = "Press keys... (Esc to cancel)";
+
+    function handler(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        cleanup();
+        onCapture(null);
+        return;
+      }
+      if (["Control", "Shift", "Alt", "Meta"].indexOf(e.key) !== -1) return;
+
+      var token = keyToToken(e);
+      if (!token) return;
+
+      var parts = [];
+      if (e.ctrlKey) parts.push("<ctrl>");
+      if (e.shiftKey) parts.push("<shift>");
+      if (e.altKey) parts.push("<alt>");
+      if (e.metaKey) parts.push("<cmd>");
+      parts.push(token);
+      cleanup();
+      onCapture(parts.join("+"));
+    }
+
+    function cleanup() {
+      document.removeEventListener("keydown", handler, true);
+      button.classList.remove("capturing");
+    }
+
+    document.addEventListener("keydown", handler, true);
+  }
+
+  function setSetting(key, value) {
+    var updates = {};
+    updates[key] = value;
+    var a = api();
+    if (!a || typeof a.set_settings !== "function") return Promise.reject(new Error("api not ready"));
+    return a.set_settings(updates).then(function (snapshot) {
+      if (snapshot && snapshot.restart_required) showRestartChip();
+      return snapshot;
+    });
+  }
+
+  function showRestartChip() {
+    document.getElementById("restart-chip").hidden = false;
+  }
+
+  function bindToggle(id, key) {
+    var el = document.getElementById(id);
+    el.addEventListener("change", function () { setSetting(key, el.checked); });
+  }
+
+  function bindSelect(id, key, isNumber) {
+    var el = document.getElementById(id);
+    el.addEventListener("change", function () {
+      setSetting(key, isNumber ? parseFloat(el.value) : el.value);
+    });
+  }
+
+  function bindHotkeyRecorder(buttonId, key, allowEmpty) {
+    var button = document.getElementById(buttonId);
+    button.addEventListener("click", function () {
+      startHotkeyCapture(button, function (combo) {
+        if (combo === null) {
+          renderHotkeyButton(button, key);
+          return;
+        }
+        button.textContent = formatHotkeyDisplay(combo);
+        setSetting(key, combo);
+      });
+    });
+  }
+
+  var _currentSettingsSnapshot = {};
+
+  function renderHotkeyButton(button, key) {
+    button.textContent = formatHotkeyDisplay(_currentSettingsSnapshot[key]);
+  }
+
+  function applySettingsToForm(snapshot) {
+    _currentSettingsSnapshot = snapshot || {};
+
+    document.getElementById("display-name-input").value = snapshot.display_name || "";
+    document.querySelector(".profile-name").textContent = snapshot.display_name || "Local Flow";
+
+    document.getElementById("hotkey-recorder").textContent = formatHotkeyDisplay(snapshot.hotkey);
+    document.getElementById("paste-hotkey-recorder").textContent = formatHotkeyDisplay(snapshot.paste_last_hotkey);
+    document.getElementById("activation-mode-select").value = snapshot.activation_mode || "toggle";
+
+    document.getElementById("overlay-scale-select").value = String(snapshot.overlay_scale || 1);
+    document.getElementById("live-preview-toggle").checked = !!snapshot.live_preview;
+
+    document.getElementById("copy-clipboard-toggle").checked = !!snapshot.copy_to_clipboard;
+    document.getElementById("lowercase-first-toggle").checked = !!snapshot.lowercase_first;
+    document.getElementById("strip-period-toggle").checked = !!snapshot.strip_trailing_period;
+    document.getElementById("space-between-toggle").checked = !!snapshot.space_between;
+
+    document.getElementById("save-history-toggle").checked = !!snapshot.save_history;
+    document.getElementById("save-audio-toggle").checked = !!snapshot.save_audio;
+  }
+
+  function loadMicList(selected) {
+    var a = api();
+    if (!a || typeof a.list_input_devices !== "function") return;
+    a.list_input_devices().then(function (devices) {
+      var select = document.getElementById("mic-select");
+      var options = ['<option value="">System default</option>'];
+      (devices || []).forEach(function (d) {
+        options.push('<option value="' + escapeHtml(d.name) + '">' + escapeHtml(d.name) + "</option>");
+      });
+      select.innerHTML = options.join("");
+      select.value = selected || "";
+    }).catch(function () {});
+  }
+
+  function loadLaunchAtLogin() {
+    var a = api();
+    if (!a || typeof a.get_launch_at_login !== "function") return;
+    a.get_launch_at_login().then(function (enabled) {
+      document.getElementById("launch-at-login-toggle").checked = !!enabled;
+    }).catch(function () {});
+  }
+
+  function loadSettingsData() {
+    callApi("get_settings").then(function (snapshot) {
+      applySettingsToForm(snapshot);
+      loadMicList(snapshot.input_device);
+    }).catch(function () {});
+    loadLaunchAtLogin();
+  }
+
+  var hotkeyTestPolling = null;
+
+  function startHotkeyTestPolling() {
+    stopHotkeyTestPolling();
+    hotkeyTestPolling = setInterval(function () {
+      callApi("get_status").then(function (data) {
+        var badge = document.getElementById("hotkey-test-badge");
+        if (!badge) return;
+        var recording = data && data.current_status === "recording";
+        badge.textContent = recording ? "Recording" : "Idle";
+        badge.className = "badge " + (recording ? "badge-accent" : "badge-warn");
+      }).catch(function () {});
+    }, 400);
+  }
+
+  function stopHotkeyTestPolling() {
+    if (hotkeyTestPolling) {
+      clearInterval(hotkeyTestPolling);
+      hotkeyTestPolling = null;
+    }
+  }
+
+  function switchSettingsSection(name) {
+    document.querySelectorAll(".settings-nav-item").forEach(function (item) {
+      item.classList.toggle("active", item.getAttribute("data-section") === name);
+    });
+    document.querySelectorAll(".settings-section").forEach(function (section) {
+      section.classList.toggle("active", section.id === "settings-" + name);
+    });
+    if (name === "shortcuts") {
+      startHotkeyTestPolling();
+    } else {
+      stopHotkeyTestPolling();
+    }
+  }
+
+  function openSettingsView() {
+    document.getElementById("main-content").classList.add("hidden-view");
+    document.getElementById("settings-view").classList.add("open");
+    document.getElementById("restart-chip").hidden = true;
+    loadSettingsData();
+  }
+
+  function closeSettingsView() {
+    stopHotkeyTestPolling();
+    document.getElementById("settings-view").classList.remove("open");
+    document.getElementById("main-content").classList.remove("hidden-view");
+  }
+
+  function initSettings() {
+    document.getElementById("settings-back").addEventListener("click", closeSettingsView);
+
+    document.querySelectorAll(".settings-nav-item").forEach(function (item) {
+      item.addEventListener("click", function () {
+        switchSettingsSection(item.getAttribute("data-section"));
+      });
+    });
+
+    document.getElementById("display-name-save").addEventListener("click", function () {
+      var value = document.getElementById("display-name-input").value.trim();
+      setSetting("display_name", value).then(function (snapshot) {
+        document.querySelector(".profile-name").textContent = value || "Local Flow";
+      });
+    });
+
+    document.getElementById("launch-at-login-toggle").addEventListener("change", function (e) {
+      var a = api();
+      if (!a) return;
+      a.set_launch_at_login(e.target.checked).catch(function () {});
+    });
+    document.getElementById("view-releases-btn").addEventListener("click", function () {
+      var a = api();
+      if (a && typeof a.open_url === "function") a.open_url("https://github.com/pdiamant-maker/local-whisper-flow/releases");
+    });
+
+    bindHotkeyRecorder("hotkey-recorder", "hotkey");
+    bindHotkeyRecorder("paste-hotkey-recorder", "paste_last_hotkey");
+    document.getElementById("paste-hotkey-clear").addEventListener("click", function () {
+      document.getElementById("paste-hotkey-recorder").textContent = "Not set";
+      setSetting("paste_last_hotkey", "");
+    });
+    bindSelect("activation-mode-select", "activation_mode", false);
+
+    document.getElementById("mic-select").addEventListener("change", function (e) {
+      setSetting("input_device", e.target.value);
+    });
+    document.getElementById("mic-refresh").addEventListener("click", function () {
+      loadMicList(document.getElementById("mic-select").value);
+    });
+    bindSelect("overlay-scale-select", "overlay_scale", true);
+    bindToggle("live-preview-toggle", "live_preview");
+
+    bindToggle("copy-clipboard-toggle", "copy_to_clipboard");
+    bindToggle("lowercase-first-toggle", "lowercase_first");
+    bindToggle("strip-period-toggle", "strip_trailing_period");
+    bindToggle("space-between-toggle", "space_between");
+
+    bindToggle("save-history-toggle", "save_history");
+    bindToggle("save-audio-toggle", "save_audio");
+
+    document.getElementById("open-logs-btn").addEventListener("click", function () {
+      var a = api();
+      if (a && typeof a.open_logs === "function") a.open_logs();
+    });
+    document.getElementById("export-support-btn").addEventListener("click", function () {
+      var a = api();
+      if (a && typeof a.export_support_bundle === "function") a.export_support_bundle();
+    });
+
+    document.getElementById("restart-now-btn").addEventListener("click", function () {
+      var a = api();
+      if (a && typeof a.restart_app === "function") a.restart_app();
+    });
+  }
+
   var initialized = false;
   function init() {
     if (initialized) return;
@@ -312,7 +581,12 @@
     initMic();
     initLastResult();
     initHistory();
+    initSettings();
     loadHealth();
+    callApi("get_settings").then(function (snapshot) {
+      var name = document.querySelector(".profile-name");
+      if (name && snapshot && snapshot.display_name) name.textContent = snapshot.display_name;
+    }).catch(function () {});
   }
 
   if (window.pywebview) {

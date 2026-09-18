@@ -44,6 +44,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import webbrowser
+import zipfile
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -137,6 +139,13 @@ ENABLE_HISTORY = True  # Record each dictation to history.db for the History tab
 SAVE_AUDIO = False  # Also keep a copy of the WAV next to history.db (privacy-sensitive, off by default).
 AUDIO_CAP_MB = 1024  # Oldest saved WAVs are pruned once the audio/ folder exceeds this size.
 
+KEEP_ON_CLIPBOARD = False  # Skip restoring the previous clipboard contents after paste.
+LOWERCASE_FIRST = False  # Lowercase the first character of each dictation.
+STRIP_TRAILING_PERIOD = False  # Remove a single trailing "." from each dictation.
+SPACE_BETWEEN_DICTATIONS = False  # Prefix a space when the previous dictation didn't end in whitespace.
+DISPLAY_NAME = "Petros Diamant"  # Shown in the sidebar profile card.
+INPUT_DEVICE = ""  # sounddevice input device name. Empty = system default.
+
 APP_DIR = Path(__file__).resolve().parent
 SCRIPT_PATH = Path(__file__).resolve()
 LOG_FILE = APP_DIR / "local_flow.log"
@@ -163,6 +172,19 @@ SETTINGS_KEYS = {
     "save_history": "ENABLE_HISTORY",
     "save_audio": "SAVE_AUDIO",
     "audio_cap_mb": "AUDIO_CAP_MB",
+    "copy_to_clipboard": "KEEP_ON_CLIPBOARD",
+    "lowercase_first": "LOWERCASE_FIRST",
+    "strip_trailing_period": "STRIP_TRAILING_PERIOD",
+    "space_between": "SPACE_BETWEEN_DICTATIONS",
+    "display_name": "DISPLAY_NAME",
+    "input_device": "INPUT_DEVICE",
+}
+
+# Settings keys that only take effect after a restart (surfaced to the UI as a chip).
+RESTART_REQUIRED_KEYS = {
+    "stt_engine", "whisper_model", "whisper_device", "whisper_compute_type",
+    "parakeet_model", "hotkey", "activation_mode", "paste_last_hotkey",
+    "overlay_scale", "tray_icon", "floating_overlay",
 }
 
 _settings_lock = threading.Lock()
@@ -254,13 +276,16 @@ whisper_model: Optional["FasterWhisperModel"] = None
 parakeet_model = None
 model_load_lock = threading.Lock()
 listener: Optional[keyboard.Listener] = None
-hotkey: Optional[keyboard.HotKey] = None
+hotkey: Optional[keyboard.HotKey] = None  # toggle-mode combo
+hold_hotkey: Optional["HoldHotkey"] = None  # hold-mode combo
+paste_last_hotkey: Optional[keyboard.HotKey] = None
 tray_icon = None
 shutdown_event = threading.Event()
 current_status = "starting"
 show_idle_overlay_until = 0.0
 last_metrics_text = ""  # Populated after each dictation when SHOW_METRICS is on.
 last_final_text = ""  # The most recent pasted/clean transcript, shown in the main window's Last Result card.
+_prev_dictation_had_trailing_space = True  # Tracks SPACE_BETWEEN_DICTATIONS state across dictations.
 live_partial_text = ""  # ponytail: plain str, assignment is atomic; a stale frame costs nothing.
 webview_window = None  # The pywebview main window, created hidden on the main thread at startup.
 _dll_directory_handles = []
@@ -946,14 +971,19 @@ def start_floating_overlay() -> None:
 
         from tkinter import font as tkfont
 
-        width = OVERLAY_PANEL_WIDTH
-        height = OVERLAY_PANEL_HEIGHT
+        scale = OVERLAY_SCALE if OVERLAY_SCALE > 0 else 1.0
+
+        def fsize(n: int) -> int:
+            return max(6, round(n * scale))
+
+        width = round(OVERLAY_PANEL_WIDTH * scale)
+        height = round(OVERLAY_PANEL_HEIGHT * scale)
         canvas = tk.Canvas(root, width=width, height=height, bg="#101820", highlightthickness=0)
         canvas.pack()
 
-        text_font = tkfont.Font(family="Segoe UI", size=10)
-        text_left = 76
-        text_width = width - text_left - 20
+        text_font = tkfont.Font(family="Segoe UI", size=fsize(10))
+        text_left = round(76 * scale)
+        text_width = width - text_left - round(20 * scale)
         icon_photos: dict[str, object] = {}  # Keep PhotoImage refs alive.
         current_icon_path: Optional[str] = None
         next_icon_poll = 0.0
@@ -1008,9 +1038,9 @@ def start_floating_overlay() -> None:
 
         # Equalizer geometry and per-status motion energy (eased for smooth transitions).
         bar_center = width // 2
-        bar_xs = tuple(bar_center + offset for offset in (-18, -9, 0, 9, 18))
-        bar_mid = 112
-        bar_max_half = 16
+        bar_xs = tuple(bar_center + round(offset * scale) for offset in (-18, -9, 0, 9, 18))
+        bar_mid = round(112 * scale)
+        bar_max_half = round(16 * scale)
         energy_targets = {"recording": 1.0, "processing": 0.55, "starting": 0.35, "idle": 0.16, "error": 0.1}
         energy = energy_targets["idle"]
 
@@ -1049,26 +1079,27 @@ def start_floating_overlay() -> None:
             canvas.create_rectangle(0, 0, width, height, fill="#101820", outline="")
             draw_round_rect(canvas, 1, 1, width - 1, height - 1, (height - 2) // 2, fill="#0D1117", outline="#2A3340", width=1)
 
+            icon_x, icon_y, icon_size = round(44 * scale), round(20 * scale), round(24 * scale)
             photo = icon_photos.get(current_icon_path) if current_icon_path else None
             if photo is not None:
-                canvas.create_image(44, 20, image=photo, anchor="nw")
+                canvas.create_image(icon_x, icon_y, image=photo, anchor="nw")
             else:
-                canvas.create_oval(44, 20, 68, 44, fill="#2A3340", outline="")
+                canvas.create_oval(icon_x, icon_y, icon_x + icon_size, icon_y + icon_size, fill="#2A3340", outline="")
 
             partial = live_partial_text
             if partial:
                 canvas.create_text(
-                    text_left, 18, text=wrap_tail(partial), anchor="nw", justify="left",
+                    text_left, round(18 * scale), text=wrap_tail(partial), anchor="nw", justify="left",
                     fill="#E6EDF3" if status == "recording" else "#7A8896",
-                    font=("Segoe UI", 10),
+                    font=("Segoe UI", fsize(10)),
                 )
             elif status == "recording":
                 canvas.create_text(
-                    text_left, 18, text="Listening…", anchor="nw",
-                    fill="#7A8896", font=("Segoe UI", 10, "italic"),
+                    text_left, round(18 * scale), text="Listening…", anchor="nw",
+                    fill="#7A8896", font=("Segoe UI", fsize(10), "italic"),
                 )
 
-            canvas.create_text(48, bar_mid, text=label, anchor="w", fill=color, font=("Segoe UI", 9, "bold"))
+            canvas.create_text(round(48 * scale), bar_mid, text=label, anchor="w", fill=color, font=("Segoe UI", fsize(9), "bold"))
             for i, x in enumerate(bar_xs):
                 if status == "processing":
                     # Gentle pulse traveling across the bars.
@@ -1081,11 +1112,11 @@ def start_floating_overlay() -> None:
                     if live > wave:
                         wave = live  # bars jump with real voice when louder than the idle dance
                 half = max(3.0, bar_max_half * energy * (0.35 + 0.65 * wave))
-                canvas.create_line(x, bar_mid - half, x, bar_mid + half, fill=color, width=6, capstyle=tk.ROUND)
+                canvas.create_line(x, bar_mid - half, x, bar_mid + half, fill=color, width=max(2, round(6 * scale)), capstyle=tk.ROUND)
             if SHOW_METRICS and last_metrics_text and status in ("idle", "processing"):
                 canvas.create_text(
-                    width // 2, height - 16,
-                    text=last_metrics_text, fill="#7A8896", font=("Segoe UI", 7),
+                    width // 2, height - round(16 * scale),
+                    text=last_metrics_text, fill="#7A8896", font=("Segoe UI", fsize(7)),
                 )
 
         def poll() -> None:
@@ -1232,6 +1263,85 @@ class UiApi:
         row = history_get_row(id)
         if row:
             paste_text(row.get("final") or "")
+
+    # ---- Settings (Phase 3) ----
+
+    def get_settings(self) -> dict:
+        snapshot = _settings_snapshot()
+        snapshot["restart_required"] = False
+        return snapshot
+
+    def set_settings(self, updates: dict) -> dict:
+        updates = updates or {}
+        save_settings(updates)
+        snapshot = _settings_snapshot()
+        snapshot["restart_required"] = any(key in RESTART_REQUIRED_KEYS for key in updates)
+        return snapshot
+
+    def get_launch_at_login(self) -> bool:
+        return get_startup_shortcut_path().exists()
+
+    def set_launch_at_login(self, enabled: bool) -> bool:
+        try:
+            if enabled:
+                enable_start_with_windows()
+            else:
+                disable_start_with_windows()
+            return True
+        except Exception as exc:
+            log(f"set_launch_at_login failed: {exc}")
+            return False
+
+    def list_input_devices(self) -> list[dict]:
+        try:
+            devices = sd.query_devices()
+            default_index = sd.default.device[0]
+        except Exception as exc:
+            log(f"list_input_devices failed: {exc}")
+            return []
+
+        seen_names: set = set()
+        rows = []
+        for index, device in enumerate(devices):
+            if device.get("max_input_channels", 0) <= 0:
+                continue
+            name = device["name"]
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            rows.append({"index": index, "name": name, "default": index == default_index})
+        return rows
+
+    def open_url(self, url: str) -> None:
+        try:
+            webbrowser.open(url)
+        except Exception as exc:
+            log(f"open_url failed: {exc}")
+
+    def open_logs(self) -> None:
+        open_path(LOG_FILE)
+
+    def export_support_bundle(self) -> bool:
+        try:
+            desktop = get_windows_folder("Desktop", Path.home() / "Desktop")
+            zip_path = desktop / "localflow-support.zip"
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as bundle:
+                if LOG_FILE.exists():
+                    bundle.write(LOG_FILE, LOG_FILE.name)
+                if SETTINGS_PATH.exists():
+                    bundle.write(SETTINGS_PATH, SETTINGS_PATH.name)
+            open_path(desktop)
+            return True
+        except Exception as exc:
+            log(f"export_support_bundle failed: {exc}")
+            return False
+
+    def restart_app(self) -> None:
+        try:
+            subprocess.Popen([str(get_windowless_python()), str(SCRIPT_PATH)], cwd=str(APP_DIR))
+        except Exception as exc:
+            log(f"restart_app failed: {exc}")
+        os._exit(0)
 
 
 def open_main_window() -> None:
@@ -1391,6 +1501,7 @@ def start_recording() -> None:
                 channels=CHANNELS,
                 dtype="float32",
                 callback=audio_callback,
+                device=INPUT_DEVICE or None,
             )
             input_stream.start()
         except Exception as exc:
@@ -1514,6 +1625,9 @@ def live_transcribe_loop() -> None:
     """Re-transcribe the audio captured so far while recording, for the overlay."""
     global live_partial_text
 
+    if not ENABLE_LIVE_PREVIEW:
+        return
+
     while is_recording and not shutdown_event.is_set():
         time.sleep(LIVE_TRANSCRIBE_INTERVAL_SECONDS)
         if not is_recording or shutdown_event.is_set():
@@ -1635,6 +1749,12 @@ def paste_text(text: str) -> None:
         log("Nothing to paste.")
         return
 
+    old_clipboard: Optional[str] = None
+    try:
+        old_clipboard = pyperclip.paste()
+    except Exception:
+        old_clipboard = None
+
     try:
         pyperclip.copy(text)
         time.sleep(PASTE_DELAY_SECONDS)
@@ -1646,11 +1766,18 @@ def paste_text(text: str) -> None:
         log("- Make sure a text field is focused.")
         log("- Try running the terminal normally, not as a different privilege level.")
         log(f"Raw error: {exc}")
+    finally:
+        if not KEEP_ON_CLIPBOARD and old_clipboard is not None:
+            try:
+                time.sleep(PASTE_DELAY_SECONDS)
+                pyperclip.copy(old_clipboard)
+            except Exception:
+                pass
 
 
 def process_recording() -> None:
     """Save, transcribe, polish, and paste the captured recording."""
-    global is_processing, last_metrics_text, last_final_text, live_partial_text
+    global is_processing, last_metrics_text, last_final_text, live_partial_text, _prev_dictation_had_trailing_space
 
     wav_path: Optional[Path] = None
     audio_seconds = 0.0
@@ -1679,6 +1806,16 @@ def process_recording() -> None:
             clean_text = raw_text
 
         log(f"Final text ({ollama_seconds:.2f}s): {clean_text}")
+
+        if LOWERCASE_FIRST and clean_text:
+            clean_text = clean_text[0].lower() + clean_text[1:]
+        if STRIP_TRAILING_PERIOD and clean_text.endswith("."):
+            clean_text = clean_text[:-1]
+        if SPACE_BETWEEN_DICTATIONS:
+            if clean_text and not _prev_dictation_had_trailing_space:
+                clean_text = " " + clean_text
+            _prev_dictation_had_trailing_space = clean_text[-1:].isspace()
+
         last_final_text = clean_text
         paste_text(clean_text)
         total_seconds = time.perf_counter() - started_at
@@ -1714,18 +1851,76 @@ def toggle_recording() -> None:
         start_recording()
 
 
+class HoldHotkey:
+    """Hold-to-talk combo tracking: fires on_start once every key in the combo is
+    pressed, on_stop the moment any one of them is released. Mirrors keyboard.HotKey's
+    parse() format but needs its own press/release state since HotKey itself only
+    supports fire-on-complete (toggle) semantics."""
+
+    def __init__(self, combo_str: str, on_start, on_stop) -> None:
+        self._keys = set(keyboard.HotKey.parse(combo_str))
+        self._pressed: set = set()
+        self._active = False
+        self._on_start = on_start
+        self._on_stop = on_stop
+
+    def press(self, key) -> None:
+        if key not in self._keys:
+            return
+        self._pressed.add(key)
+        if not self._active and self._keys <= self._pressed:
+            self._active = True
+            self._on_start()
+
+    def release(self, key) -> None:
+        if key not in self._keys:
+            return
+        self._pressed.discard(key)
+        if self._active:
+            self._active = False
+            self._on_stop()
+
+
 def on_press(key) -> None:
     try:
-        hotkey.press(listener.canonical(key))
+        canonical = listener.canonical(key)
+    except Exception:
+        return
+
+    try:
+        if ACTIVATION_MODE == "hold" and hold_hotkey is not None:
+            hold_hotkey.press(canonical)
+        elif hotkey is not None:
+            hotkey.press(canonical)
     except Exception:
         pass
+
+    if paste_last_hotkey is not None:
+        try:
+            paste_last_hotkey.press(canonical)
+        except Exception:
+            pass
 
 
 def on_release(key) -> None:
     try:
-        hotkey.release(listener.canonical(key))
+        canonical = listener.canonical(key)
+    except Exception:
+        return
+
+    try:
+        if ACTIVATION_MODE == "hold" and hold_hotkey is not None:
+            hold_hotkey.release(canonical)
+        elif hotkey is not None:
+            hotkey.release(canonical)
     except Exception:
         pass
+
+    if paste_last_hotkey is not None:
+        try:
+            paste_last_hotkey.release(canonical)
+        except Exception:
+            pass
 
 
 def print_startup_banner() -> None:
@@ -1768,7 +1963,20 @@ if __name__ == "__main__":
 
     threading.Thread(target=warm_ollama_model, daemon=True).start()
 
-    hotkey = keyboard.HotKey(keyboard.HotKey.parse(HOTKEY), toggle_recording)
+    if ACTIVATION_MODE == "hold":
+        hold_hotkey = HoldHotkey(HOTKEY, start_recording, stop_recording)
+    else:
+        hotkey = keyboard.HotKey(keyboard.HotKey.parse(HOTKEY), toggle_recording)
+
+    if PASTE_LAST_HOTKEY:
+        try:
+            paste_last_hotkey = keyboard.HotKey(
+                keyboard.HotKey.parse(PASTE_LAST_HOTKEY), lambda: paste_text(last_final_text)
+            )
+        except Exception as exc:
+            log(f"Invalid paste-last hotkey {PASTE_LAST_HOTKEY!r}: {exc}")
+            paste_last_hotkey = None
+
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
 
     # pywebview must create its window and run its GUI loop on the main thread on Windows.

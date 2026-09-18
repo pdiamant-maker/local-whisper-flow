@@ -61,7 +61,7 @@
     </div>
   </aside>
 
-  <main class="content">
+  <main class="content" id="main-content">
     <section class="pane active" id="pane-home">
       <h1 class="page-title">Home</h1>
 
@@ -129,6 +129,228 @@
     <section class="pane" id="pane-insights"><div class="placeholder">Coming in a later phase</div></section>
     <section class="pane" id="pane-custom-dictionary"><div class="placeholder">Coming in a later phase</div></section>
   </main>
+
+  <div class="settings-view" id="settings-view">
+    <aside class="settings-sidebar">
+      <button class="btn settings-back" id="settings-back">&#8249; Back to app</button>
+      <nav class="settings-nav">
+        <button class="settings-nav-item active" data-section="profile">Profile</button>
+        <button class="settings-nav-item" data-section="general">General</button>
+        <button class="settings-nav-item" data-section="shortcuts">Keyboard shortcuts</button>
+        <button class="settings-nav-item" data-section="voice">Voice &amp; capture</button>
+        <button class="settings-nav-item" data-section="text">Text</button>
+        <button class="settings-nav-item" data-section="history-settings">History</button>
+        <button class="settings-nav-item" data-section="privacy">Privacy &amp; support</button>
+      </nav>
+    </aside>
+
+    <div class="settings-panes">
+      <div class="restart-chip" id="restart-chip" hidden>
+        <span>Restart required for this change to take effect.</span>
+        <button class="btn btn-primary" id="restart-now-btn">Restart now</button>
+      </div>
+
+      <section class="settings-section active" id="settings-profile">
+        <h1 class="settings-section-title">Profile</h1>
+        <div class="card">
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Display name</div>
+              <div class="setting-row-subtitle">Shown in the sidebar profile card.</div>
+            </div>
+            <div class="setting-row-control">
+              <input type="text" class="text-input" id="display-name-input" placeholder="Your name">
+              <button class="btn btn-primary" id="display-name-save">Save</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section" id="settings-general">
+        <h1 class="settings-section-title">General</h1>
+        <div class="card">
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Launch at login</div>
+              <div class="setting-row-subtitle">Start Local Flow automatically when Windows starts.</div>
+            </div>
+            <div class="setting-row-control">
+              <label class="switch"><input type="checkbox" id="launch-at-login-toggle"><span class="slider"></span></label>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Updates</div>
+              <div class="setting-row-subtitle">Version 1.0</div>
+            </div>
+            <div class="setting-row-control">
+              <button class="btn" id="view-releases-btn">View releases</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section" id="settings-shortcuts">
+        <h1 class="settings-section-title">Keyboard shortcuts</h1>
+        <div class="card">
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Dictation hotkey</div>
+              <div class="setting-row-subtitle">Starts/stops (or holds) dictation from anywhere.</div>
+            </div>
+            <div class="setting-row-control">
+              <button class="hotkey-btn" id="hotkey-recorder"></button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Test it</div>
+              <div class="setting-row-subtitle">Press it to check.</div>
+            </div>
+            <div class="setting-row-control">
+              <span class="badge badge-warn" id="hotkey-test-badge">Idle</span>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Paste last transcription</div>
+              <div class="setting-row-subtitle">Optional global hotkey to re-paste the last result.</div>
+            </div>
+            <div class="setting-row-control">
+              <button class="hotkey-btn" id="paste-hotkey-recorder"></button>
+              <button class="btn" id="paste-hotkey-clear">Clear</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Activation mode</div>
+              <div class="setting-row-subtitle">Toggle: press to start/stop. Hold: record while held. Restart required.</div>
+            </div>
+            <div class="setting-row-control">
+              <select class="select-control" id="activation-mode-select">
+                <option value="toggle">Toggle</option>
+                <option value="hold">Hold to talk</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section" id="settings-voice">
+        <h1 class="settings-section-title">Voice &amp; capture</h1>
+        <div class="card">
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Microphone</div>
+              <div class="setting-row-subtitle">Input device used for dictation.</div>
+            </div>
+            <div class="setting-row-control">
+              <select class="select-control" id="mic-select"></select>
+              <button class="btn" id="mic-refresh">Refresh</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Overlay size</div>
+              <div class="setting-row-subtitle">Restart required.</div>
+            </div>
+            <div class="setting-row-control">
+              <select class="select-control" id="overlay-scale-select">
+                <option value="0.85">Small</option>
+                <option value="1">Medium</option>
+                <option value="1.2">Large</option>
+              </select>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Live preview</div>
+              <div class="setting-row-subtitle">Show the streaming partial transcript on the overlay.</div>
+            </div>
+            <div class="setting-row-control">
+              <label class="switch"><input type="checkbox" id="live-preview-toggle"><span class="slider"></span></label>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section" id="settings-text">
+        <h1 class="settings-section-title">Text</h1>
+        <div class="card">
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Keep on clipboard</div>
+              <div class="setting-row-subtitle">Don't restore your previous clipboard after pasting.</div>
+            </div>
+            <div class="setting-row-control"><label class="switch"><input type="checkbox" id="copy-clipboard-toggle"><span class="slider"></span></label></div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text"><div class="setting-row-title">Lowercase first letter</div></div>
+            <div class="setting-row-control"><label class="switch"><input type="checkbox" id="lowercase-first-toggle"><span class="slider"></span></label></div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text"><div class="setting-row-title">Remove trailing period</div></div>
+            <div class="setting-row-control"><label class="switch"><input type="checkbox" id="strip-period-toggle"><span class="slider"></span></label></div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Space between dictations</div>
+              <div class="setting-row-subtitle">Add a space if the previous dictation didn't end with one.</div>
+            </div>
+            <div class="setting-row-control"><label class="switch"><input type="checkbox" id="space-between-toggle"><span class="slider"></span></label></div>
+          </div>
+        </div>
+        <div class="muted settings-note">Insertion mode: clipboard paste only. This is the only mode Local Flow supports today.</div>
+      </section>
+
+      <section class="settings-section" id="settings-history-settings">
+        <h1 class="settings-section-title">History</h1>
+        <div class="card">
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Save history</div>
+              <div class="setting-row-subtitle">Record each dictation locally for the History tab.</div>
+            </div>
+            <div class="setting-row-control"><label class="switch"><input type="checkbox" id="save-history-toggle"><span class="slider"></span></label></div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Save audio</div>
+              <div class="setting-row-subtitle">Keep the WAV recording alongside each entry.</div>
+            </div>
+            <div class="setting-row-control"><label class="switch"><input type="checkbox" id="save-audio-toggle"><span class="slider"></span></label></div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Storage cap</div>
+              <div class="setting-row-subtitle">Up to 1 GB, oldest pruned automatically.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section" id="settings-privacy">
+        <h1 class="settings-section-title">Privacy &amp; support</h1>
+        <div class="card">
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Logs</div>
+              <div class="setting-row-subtitle">Open local_flow.log.</div>
+            </div>
+            <div class="setting-row-control"><button class="btn" id="open-logs-btn">Open Logs</button></div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Support bundle</div>
+              <div class="setting-row-subtitle">Zip the log and settings to your Desktop.</div>
+            </div>
+            <div class="setting-row-control"><button class="btn" id="export-support-btn">Export</button></div>
+          </div>
+        </div>
+        <div class="muted settings-note">Nothing leaves your computer. No analytics.</div>
+      </section>
+    </div>
+  </div>
 </div>
 <script src="app.js"></script>
 </body>
