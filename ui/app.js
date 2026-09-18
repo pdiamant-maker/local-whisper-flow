@@ -449,6 +449,222 @@
     };
   }
 
+  // ---- Insights ----
+  function heatmapLevel(words, max) {
+    if (!words || !max) return 0;
+    var ratio = words / max;
+    if (ratio > 0.75) return 4;
+    if (ratio > 0.5) return 3;
+    if (ratio > 0.25) return 2;
+    return 1;
+  }
+
+  function buildHeatmap(heatmap) {
+    var byDate = {};
+    (heatmap || []).forEach(function (h) { byDate[h.date] = h.words; });
+    var maxWords = (heatmap || []).reduce(function (m, h) { return Math.max(m, h.words); }, 0);
+
+    var today = new Date();
+    today.setHours(0, 0, 0, 0);
+    var totalDays = 16 * 7;
+    // Align the grid so the last column ends on today's day-of-week.
+    var start = new Date(today);
+    start.setDate(start.getDate() - (totalDays - 1));
+    start.setDate(start.getDate() - start.getDay());
+
+    var cells = [];
+    var monthLabels = [];
+    var lastMonth = null;
+    for (var week = 0; week < 17; week++) {
+      var monthOfWeek = null;
+      for (var dow = 0; dow < 7; dow++) {
+        var d = new Date(start);
+        d.setDate(d.getDate() + week * 7 + dow);
+        if (d > today) continue;
+        var iso = d.toISOString().slice(0, 10);
+        var words = byDate[iso] || 0;
+        cells.push('<div class="heatmap-cell level-' + heatmapLevel(words, maxWords) + '" title="' + iso + (words ? ": " + words + " words" : "") + '"></div>');
+        if (dow === 0) monthOfWeek = d.getMonth();
+      }
+      var label = (monthOfWeek !== null && monthOfWeek !== lastMonth) ? MONTH_NAMES[monthOfWeek] : "";
+      if (label) lastMonth = monthOfWeek;
+      monthLabels.push('<div>' + label + '</div>');
+    }
+
+    return (
+      '<div class="heatmap-months">' + monthLabels.join("") + '</div>' +
+      '<div class="heatmap-body">' +
+        '<div class="heatmap-day-labels"><div>Sun</div><div></div><div>Tue</div><div></div><div>Thu</div><div></div><div>Sat</div></div>' +
+        '<div class="heatmap-grid">' + cells.join("") + '</div>' +
+      '</div>' +
+      '<div class="heatmap-legend">Less' +
+        '<span class="heatmap-cell"></span><span class="heatmap-cell level-1"></span><span class="heatmap-cell level-2"></span>' +
+        '<span class="heatmap-cell level-3"></span><span class="heatmap-cell level-4"></span>More</div>'
+    );
+  }
+
+  var MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  function renderInsights(data) {
+    var body = document.getElementById("insights-body");
+    if (!data || data.empty) {
+      body.innerHTML = '<div class="card"><div class="placeholder">Dictate a few times and your insights will show up here.</div></div>';
+      return;
+    }
+
+    var maxAppCount = (data.per_app || []).reduce(function (m, a) { return Math.max(m, a.count); }, 0) || 1;
+    var appBars = (data.per_app || []).map(function (a) {
+      var pct = Math.round((a.count / maxAppCount) * 100);
+      return (
+        '<div class="app-bar-row">' +
+          '<div class="app-bar-top"><span class="app-bar-name">' + escapeHtml(a.app || "Unknown") + '</span>' +
+            '<span class="app-bar-meta">' + a.count + '</span></div>' +
+          '<div class="app-bar-track"><div class="app-bar-fill" style="width:' + pct + '%"></div></div>' +
+        '</div>'
+      );
+    }).join("") || '<div class="muted">No app data yet.</div>';
+
+    body.innerHTML = (
+      '<div class="card insights-hero">' +
+        '<div class="insights-hero-label">Voice Impact</div>' +
+        '<div class="insights-hero-number">' + data.hours_saved + ' hrs</div>' +
+        '<div class="insights-hero-subtitle">reclaimed by dictating instead of typing</div>' +
+        '<div class="insights-chip-row">' +
+          '<div class="insights-chip"><div class="insights-chip-value">' + data.speed_multiple + 'x</div><div class="insights-chip-label">Speed vs typing</div></div>' +
+          '<div class="insights-chip"><div class="insights-chip-value">' + data.words_this_week + '</div><div class="insights-chip-label">Words this week</div></div>' +
+          '<div class="insights-chip"><div class="insights-chip-value">' + data.words_today + '</div><div class="insights-chip-label">Words today</div></div>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="insights-totals-row">' +
+        '<div class="card"><div class="insights-totals-value">' + data.total_words + '</div><div class="insights-totals-label">Total words &middot; ' + data.total_count + ' dictations</div></div>' +
+        '<div class="card"><div class="insights-totals-value">' + data.avg_words + '</div><div class="insights-totals-label">Typical dictation length (words)</div></div>' +
+        '<div class="card"><div class="insights-totals-value">' + data.pct_ai + '%</div><div class="insights-totals-label">AI polished</div></div>' +
+      '</div>' +
+
+      '<div class="card">' +
+        '<h2 class="card-title">Personal Bests</h2>' +
+        '<div class="bests-grid">' +
+          '<div class="bests-tile"><div class="bests-tile-value">' + data.max_words_single + '</div><div class="bests-tile-label">Most words, one dictation</div></div>' +
+          '<div class="bests-tile"><div class="bests-tile-value">' + data.max_words_day + '</div><div class="bests-tile-label">Most words in a day</div></div>' +
+          '<div class="bests-tile"><div class="bests-tile-value">' + data.max_dictations_day + '</div><div class="bests-tile-label">Most dictations in a day</div></div>' +
+          '<div class="bests-tile"><div class="bests-tile-value">' + escapeHtml(data.favorite_hour_range) + '</div><div class="bests-tile-label">Favorite time to dictate</div></div>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="card">' +
+        '<h2 class="card-title">Monthly Progress</h2>' +
+        '<div class="streak-line"><strong>' + data.current_streak + '-day</strong> current streak &middot; longest <strong>' + data.longest_streak + ' days</strong></div>' +
+        '<div class="progress-row">' +
+          '<div class="progress-row-item"><div class="progress-row-value">' + data.words_this_week + '</div><div class="progress-row-label">Words this week</div></div>' +
+          '<div class="progress-row-item"><div class="progress-row-value">' + data.total_count + '</div><div class="progress-row-label">Total dictations</div></div>' +
+        '</div>' +
+        buildHeatmap(data.heatmap) +
+        '<div class="heatmap-footnote">Last 16 weeks &middot; darker means more words dictated that day.</div>' +
+      '</div>' +
+
+      '<div class="card">' +
+        '<h2 class="card-title">Where You Dictate</h2>' +
+        appBars +
+      '</div>'
+    );
+  }
+
+  function loadInsights() {
+    var a = api();
+    if (!a || typeof a.get_insights !== "function") return;
+    a.get_insights().then(renderInsights).catch(function () {
+      document.getElementById("insights-body").innerHTML = '<div class="card"><div class="placeholder">Could not load insights.</div></div>';
+    });
+  }
+
+  function initInsights() {
+    var navItem = document.querySelector('.nav-item[data-pane="insights"]');
+    if (navItem) navItem.addEventListener("click", loadInsights);
+  }
+
+  // ---- Custom Dictionary ----
+  var dictEntries = [];
+
+  function renderDictionary() {
+    var list = document.getElementById("dict-list");
+    var count = document.getElementById("dict-count");
+    count.textContent = dictEntries.length + " replacement" + (dictEntries.length === 1 ? "" : "s");
+
+    if (!dictEntries.length) {
+      list.innerHTML = '<div class="muted">No replacements yet. Add one above to get started.</div>';
+      return;
+    }
+
+    list.innerHTML = dictEntries.map(function (entry, index) {
+      return (
+        '<div class="dict-row">' +
+          '<div class="dict-row-text"><span class="dict-row-hears">' + escapeHtml((entry.hears || []).join(", ")) + '</span> &rarr; ' + escapeHtml(entry.writes || "") + '</div>' +
+          '<button class="dict-delete-btn" data-index="' + index + '" title="Delete">' +
+            '<svg viewBox="0 0 24 24" width="16" height="16" fill="none"><path d="M5 6h14M9 6V4h6v2m-8 0 1 14h8l1-14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+          '</button>' +
+        '</div>'
+      );
+    }).join("");
+
+    list.querySelectorAll(".dict-delete-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var a = api();
+        if (!a) return;
+        a.dict_delete(parseInt(btn.getAttribute("data-index"), 10)).then(loadDictionary);
+      });
+    });
+  }
+
+  function loadDictionary() {
+    var a = api();
+    if (!a || typeof a.dict_list !== "function") return;
+    a.dict_list().then(function (entries) {
+      dictEntries = entries || [];
+      renderDictionary();
+    }).catch(function () {});
+  }
+
+  function initCustomDictionary() {
+    var navItem = document.querySelector('.nav-item[data-pane="custom-dictionary"]');
+    if (navItem) navItem.addEventListener("click", loadDictionary);
+
+    document.getElementById("dict-add-btn").addEventListener("click", function () {
+      var a = api();
+      if (!a) return;
+      var hears = document.getElementById("dict-hears-input").value;
+      var writes = document.getElementById("dict-writes-input").value;
+      var errorBox = document.getElementById("dict-error");
+      a.dict_add(hears, writes).then(function (result) {
+        if (result && result.error) {
+          errorBox.textContent = result.error;
+          errorBox.hidden = false;
+          return;
+        }
+        errorBox.hidden = true;
+        document.getElementById("dict-hears-input").value = "";
+        document.getElementById("dict-writes-input").value = "";
+        loadDictionary();
+      });
+    });
+
+    document.getElementById("dict-export-btn").addEventListener("click", function () {
+      var a = api();
+      if (a && typeof a.dict_export === "function") a.dict_export();
+    });
+    document.getElementById("dict-import-btn").addEventListener("click", function () {
+      var a = api();
+      if (!a || typeof a.dict_import !== "function") return;
+      a.dict_import().then(function (result) {
+        if (result && result.error) {
+          alert(result.error);
+          return;
+        }
+        loadDictionary();
+      });
+    });
+  }
+
   // ---- Settings ----
   var KEY_NAME_MAP = {
     " ": "<space>", "Escape": "<esc>", "Tab": "<tab>", "Enter": "<enter>",
@@ -573,6 +789,7 @@
 
     document.getElementById("save-history-toggle").checked = !!snapshot.save_history;
     document.getElementById("save-audio-toggle").checked = !!snapshot.save_audio;
+    document.getElementById("weekends-streak-toggle").checked = !!snapshot.weekends_streak;
   }
 
   function loadMicList(selected) {
@@ -704,6 +921,7 @@
 
     bindToggle("save-history-toggle", "save_history");
     bindToggle("save-audio-toggle", "save_audio");
+    bindToggle("weekends-streak-toggle", "weekends_streak");
 
     document.getElementById("open-logs-btn").addEventListener("click", function () {
       var a = api();
@@ -730,6 +948,8 @@
     initHistory();
     initVoiceEngine();
     initAiEnhancements();
+    initInsights();
+    initCustomDictionary();
     initSettings();
     loadHealth();
     callApi("get_settings").then(function (snapshot) {

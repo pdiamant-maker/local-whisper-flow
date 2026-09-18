@@ -35,3 +35,4 @@ history.db
 history.db-wal
 history.db-shm
 audio/
+dictionary.json

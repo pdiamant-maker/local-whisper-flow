@@ -155,8 +155,45 @@
       </div>
     </section>
 
-    <section class="pane" id="pane-insights"><div class="placeholder">Coming in a later phase</div></section>
-    <section class="pane" id="pane-custom-dictionary"><div class="placeholder">Coming in a later phase</div></section>
+    <section class="pane" id="pane-insights">
+      <h1 class="page-title">Insights</h1>
+      <div id="insights-body"><div class="muted">Loading...</div></div>
+    </section>
+
+    <section class="pane" id="pane-custom-dictionary">
+      <div class="history-header">
+        <div>
+          <h1 class="page-title">Custom Dictionary</h1>
+          <div class="history-subtitle">Teach Local Flow to fix words it consistently mishears.</div>
+        </div>
+        <div class="history-header-actions">
+          <button class="btn" id="dict-import-btn">Import</button>
+          <button class="btn" id="dict-export-btn">Export</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">Add Replacement</h2>
+        <div class="dict-field">
+          <label class="dict-label" for="dict-hears-input">WHEN LOCAL FLOW HEARS</label>
+          <input type="text" class="text-input dict-input" id="dict-hears-input" placeholder="wispr flow, whisper floh">
+          <div class="muted dict-helper">Separate multiple versions with commas.</div>
+        </div>
+        <div class="dict-field">
+          <label class="dict-label" for="dict-writes-input">CHANGE IT TO</label>
+          <input type="text" class="text-input dict-input" id="dict-writes-input" placeholder="Wispr Flow">
+          <div class="muted dict-helper">The exact text to paste instead.</div>
+        </div>
+        <div class="dict-error" id="dict-error" hidden></div>
+        <button class="btn btn-primary dict-add-btn" id="dict-add-btn">Add Replacement</button>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">Your Dictionary</h2>
+        <div class="history-subtitle" id="dict-count">0 replacements</div>
+        <div id="dict-list" class="dict-list"></div>
+      </div>
+    </section>
   </main>
 
   <div class="settings-view" id="settings-view">
@@ -354,6 +391,13 @@
               <div class="setting-row-title">Storage cap</div>
               <div class="setting-row-subtitle">Up to 1 GB, oldest pruned automatically.</div>
             </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Weekends don't break streak</div>
+              <div class="setting-row-subtitle">Skip Saturday and Sunday when counting your dictation streak in Insights.</div>
+            </div>
+            <div class="setting-row-control"><label class="switch"><input type="checkbox" id="weekends-streak-toggle"><span class="slider"></span></label></div>
           </div>
         </div>
       </section>

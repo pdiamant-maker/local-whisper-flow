@@ -36,6 +36,7 @@ import json
 import math
 import os
 import queue
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -46,6 +47,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 import zipfile
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -138,6 +140,7 @@ PASTE_LAST_HOTKEY = ""  # Optional hotkey to re-paste the last transcript. Empty
 ENABLE_HISTORY = True  # Record each dictation to history.db for the History tab.
 SAVE_AUDIO = False  # Also keep a copy of the WAV next to history.db (privacy-sensitive, off by default).
 AUDIO_CAP_MB = 1024  # Oldest saved WAVs are pruned once the audio/ folder exceeds this size.
+WEEKENDS_DONT_BREAK_STREAK = True  # Sat/Sun gaps don't end a dictation streak, for Insights.
 
 KEEP_ON_CLIPBOARD = False  # Skip restoring the previous clipboard contents after paste.
 LOWERCASE_FIRST = False  # Lowercase the first character of each dictation.
@@ -152,6 +155,7 @@ LOG_FILE = APP_DIR / "local_flow.log"
 SHORTCUT_NAME = f"{APP_NAME}.lnk"
 SETTINGS_PATH = Path(__file__).resolve().parent / "settings.json"
 HISTORY_DB = APP_DIR / "history.db"
+DICTIONARY_PATH = APP_DIR / "dictionary.json"
 HF_CACHE_DIR = Path.home() / ".cache" / "huggingface" / "hub"
 
 
@@ -197,6 +201,7 @@ SETTINGS_KEYS = {
     "save_history": "ENABLE_HISTORY",
     "save_audio": "SAVE_AUDIO",
     "audio_cap_mb": "AUDIO_CAP_MB",
+    "weekends_streak": "WEEKENDS_DONT_BREAK_STREAK",
     "copy_to_clipboard": "KEEP_ON_CLIPBOARD",
     "lowercase_first": "LOWERCASE_FIRST",
     "strip_trailing_period": "STRIP_TRAILING_PERIOD",
@@ -890,6 +895,182 @@ def history_clear_rows() -> bool:
         return False
 
 
+def _word_count(text: Optional[str]) -> int:
+    return len(text.split()) if text else 0
+
+
+def _format_hour_label(hour: int) -> str:
+    def fmt(h: int) -> str:
+        h12 = h % 12 or 12
+        return f"{h12}{'am' if h < 12 else 'pm'}"
+
+    return f"{fmt(hour)}–{fmt((hour + 1) % 24)}"
+
+
+def _streak_gap_bridgeable(prev_date: date, cur_date: date, weekends_dont_break: bool) -> bool:
+    """True if `cur_date` continues an active streak that last ran on `prev_date`."""
+    gap_days = (cur_date - prev_date).days
+    if gap_days <= 1:
+        return True
+    if not weekends_dont_break:
+        return False
+    day = prev_date + timedelta(days=1)
+    while day < cur_date:
+        if day.weekday() not in (5, 6):  # Saturday, Sunday
+            return False
+        day += timedelta(days=1)
+    return True
+
+
+def _compute_streaks(active_dates: list[date], today: date, weekends_dont_break: bool) -> tuple[int, int]:
+    """Returns (longest_streak, current_streak) in days, from sorted unique active dates."""
+    if not active_dates:
+        return 0, 0
+
+    longest = run = 1
+    for i in range(1, len(active_dates)):
+        if _streak_gap_bridgeable(active_dates[i - 1], active_dates[i], weekends_dont_break):
+            run += 1
+        else:
+            longest = max(longest, run)
+            run = 1
+    longest = max(longest, run)
+
+    last_active = active_dates[-1]
+    current = run if _streak_gap_bridgeable(last_active, today, weekends_dont_break) else 0
+    return longest, current
+
+
+def compute_insights(conn: sqlite3.Connection) -> dict:
+    """Pure function over a dictations connection so it is unit-testable without history.db."""
+    rows = conn.execute("SELECT ts, final, ai_processed, app FROM dictations").fetchall()
+    if not rows:
+        return {"empty": True}
+
+    today = datetime.now().date()
+    week_start = today - timedelta(days=today.weekday())
+
+    total_words = 0
+    words_today = 0
+    words_this_week = 0
+    max_words_single = 0
+    ai_count = 0
+    words_by_day: dict[date, int] = {}
+    count_by_day: dict[date, int] = {}
+    hour_counts: dict[int, int] = {}
+    app_counts: dict[str, int] = {}
+
+    for ts, final, ai_processed, app in rows:
+        wc = _word_count(final)
+        total_words += wc
+        max_words_single = max(max_words_single, wc)
+        if ai_processed:
+            ai_count += 1
+
+        dt = datetime.fromtimestamp(ts)
+        d = dt.date()
+        words_by_day[d] = words_by_day.get(d, 0) + wc
+        count_by_day[d] = count_by_day.get(d, 0) + 1
+        hour_counts[dt.hour] = hour_counts.get(dt.hour, 0) + 1
+        if app:
+            app_counts[app] = app_counts.get(app, 0) + 1
+        if d == today:
+            words_today += wc
+        if d >= week_start:
+            words_this_week += wc
+
+    total_count = len(rows)
+    fav_hour = max(hour_counts.items(), key=lambda kv: kv[1])[0] if hour_counts else None
+    active_dates = sorted(words_by_day.keys())
+    longest_streak, current_streak = _compute_streaks(active_dates, today, WEEKENDS_DONT_BREAK_STREAK)
+
+    heatmap_start = today - timedelta(weeks=16)
+    heatmap = [
+        {"date": d.isoformat(), "words": w}
+        for d, w in sorted(words_by_day.items())
+        if d >= heatmap_start
+    ]
+    per_app = sorted(app_counts.items(), key=lambda kv: -kv[1])[:7]
+
+    return {
+        "empty": False,
+        "total_words": total_words,
+        "total_count": total_count,
+        "avg_words": round(total_words / total_count, 1) if total_count else 0,
+        "pct_ai": round(ai_count / total_count * 100, 1) if total_count else 0,
+        "hours_saved": round(total_words * (1 / 40 - 1 / 150) / 60, 1),
+        "speed_multiple": 3.8,  # ponytail: static 150wpm dictation vs 40wpm typing, not measured live.
+        "words_this_week": words_this_week,
+        "words_today": words_today,
+        "max_words_single": max_words_single,
+        "max_words_day": max(words_by_day.values()) if words_by_day else 0,
+        "max_dictations_day": max(count_by_day.values()) if count_by_day else 0,
+        "favorite_hour_range": _format_hour_label(fav_hour) if fav_hour is not None else "—",
+        "current_streak": current_streak,
+        "longest_streak": longest_streak,
+        "heatmap": heatmap,
+        "per_app": [{"app": app, "count": count} for app, count in per_app],
+    }
+
+
+def insights_compute() -> dict:
+    """Insights over the real history.db. Never raises into the UI."""
+    try:
+        with _history_lock:
+            return compute_insights(_get_history_conn())
+    except Exception as exc:
+        log(f"insights_compute failed: {exc}")
+        return {"empty": True}
+
+
+# -----------------------------
+# Custom dictionary (applied to raw transcript before AI cleanup)
+# -----------------------------
+
+_dictionary_lock = threading.Lock()
+_dictionary_cache: Optional[list] = None
+
+
+def load_dictionary() -> list[dict]:
+    """[{"hears": ["variant", ...], "writes": "Correct"}], cached until a mutation reloads it."""
+    global _dictionary_cache
+    with _dictionary_lock:
+        if _dictionary_cache is not None:
+            return _dictionary_cache
+        if not DICTIONARY_PATH.exists():
+            _dictionary_cache = []
+            return _dictionary_cache
+        try:
+            data = json.loads(DICTIONARY_PATH.read_text(encoding="utf-8"))
+            _dictionary_cache = data if isinstance(data, list) else []
+        except (OSError, json.JSONDecodeError) as exc:
+            log(f"[dictionary] could not read {DICTIONARY_PATH}: {exc}")
+            _dictionary_cache = []
+        return _dictionary_cache
+
+
+def _save_dictionary(entries: list[dict]) -> None:
+    global _dictionary_cache
+    with _dictionary_lock:
+        DICTIONARY_PATH.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+        _dictionary_cache = entries
+
+
+def apply_dictionary(text: str) -> str:
+    """Case-insensitive, whole-word(ish) replacement of each configured variant."""
+    if not text:
+        return text
+    for entry in load_dictionary():
+        writes = entry.get("writes") or ""
+        if not writes:
+            continue
+        for variant in entry.get("hears") or []:
+            if not variant:
+                continue
+            text = re.sub(r"\b" + re.escape(variant) + r"\b", writes, text, flags=re.IGNORECASE)
+    return text
+
+
 def get_app_icon_image(exe_path: str):
     """Extract a 24x24 PIL image of an exe's icon. Returns None when unavailable."""
     global _icon_warning_logged
@@ -1413,6 +1594,63 @@ class UiApi:
             log(f"restart_app failed: {exc}")
         os._exit(0)
 
+    # ---- Insights (Phase 5) ----
+
+    def get_insights(self) -> dict:
+        return insights_compute()
+
+    # ---- Custom dictionary (Phase 6) ----
+
+    def dict_list(self) -> list[dict]:
+        return load_dictionary()
+
+    def dict_add(self, hears_csv: str, writes: str) -> dict:
+        writes = (writes or "").strip()
+        variants = [v.strip() for v in (hears_csv or "").split(",") if v.strip()]
+        if not writes or not variants:
+            return {"error": "Enter at least one phrase Local Flow hears, and what to change it to."}
+        entries = load_dictionary()
+        entries.append({"hears": variants, "writes": writes})
+        _save_dictionary(entries)
+        return {"ok": True}
+
+    def dict_delete(self, index: int) -> bool:
+        entries = load_dictionary()
+        if 0 <= index < len(entries):
+            entries.pop(index)
+            _save_dictionary(entries)
+            return True
+        return False
+
+    def dict_export(self) -> dict:
+        try:
+            desktop = get_windows_folder("Desktop", Path.home() / "Desktop")
+            dest = desktop / "localflow-dictionary.json"
+            dest.write_text(json.dumps(load_dictionary(), indent=2), encoding="utf-8")
+            open_path(desktop)
+            return {"ok": True, "path": str(dest)}
+        except Exception as exc:
+            log(f"dict_export failed: {exc}")
+            return {"error": str(exc)}
+
+    def dict_import(self) -> dict:
+        """Reads localflow-dictionary.json from the Desktop and merges it in."""
+        try:
+            desktop = get_windows_folder("Desktop", Path.home() / "Desktop")
+            src = desktop / "localflow-dictionary.json"
+            if not src.exists():
+                return {"error": f"No file found at {src}. Export a dictionary there first."}
+            data = json.loads(src.read_text(encoding="utf-8"))
+            if not isinstance(data, list):
+                return {"error": "That file is not a valid dictionary export."}
+            new_entries = [e for e in data if isinstance(e, dict) and e.get("hears") and e.get("writes")]
+            entries = load_dictionary() + new_entries
+            _save_dictionary(entries)
+            return {"ok": True, "count": len(new_entries)}
+        except Exception as exc:
+            log(f"dict_import failed: {exc}")
+            return {"error": str(exc)}
+
 
 def open_main_window() -> None:
     """Show the main window created on the main thread at startup."""
@@ -1865,6 +2103,7 @@ def process_recording() -> None:
             log("Whisper returned no text. Try speaking closer to the mic.")
             return
 
+        raw_text = apply_dictionary(raw_text)
         log(f"Raw transcript ({transcribe_seconds:.2f}s): {raw_text}")
 
         stage_started = time.perf_counter()
