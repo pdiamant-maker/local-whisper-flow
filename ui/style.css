@@ -607,3 +607,58 @@ html, body {
   color: var(--warning);
   max-width: 720px;
 }
+
+/* Voice Engine / AI Enhancements */
+.engine-hero-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+
+.engine-hero-name { font-size: 18px; font-weight: 600; margin-bottom: 2px; }
+.engine-hero-vendor { font-size: 12.5px; color: var(--text-secondary); margin-bottom: 14px; }
+
+.engine-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+.engine-badge {
+  font-size: 11.5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #0D1117;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.engine-list { display: flex; flex-direction: column; gap: 12px; }
+
+.engine-item {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: #0D1117;
+}
+
+.engine-item-top { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.engine-item-name { font-size: 14px; font-weight: 600; }
+.engine-item-desc { font-size: 12.5px; color: var(--text-secondary); margin-bottom: 10px; }
+.engine-item-note { font-size: 11.5px; color: var(--text-secondary); margin-bottom: 10px; }
+.engine-item-footer { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+
+.badge-active { background: rgba(45, 180, 92, 0.15); color: var(--success); }
+.badge-ready { background: rgba(122, 136, 150, 0.18); color: var(--text-secondary); }
+
+.notice-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(245, 166, 35, 0.1);
+  border: 1px solid rgba(245, 166, 35, 0.35);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--warning);
+}

@@ -124,6 +124,153 @@
     });
   }
 
+  // ---- Voice Engine ----
+  function formatBytes(bytes) {
+    if (bytes == null) return "size unknown";
+    var units = ["B", "KB", "MB", "GB"];
+    var i = 0;
+    var n = bytes;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? n : n.toFixed(n >= 10 ? 0 : 1)) + " " + units[i];
+  }
+
+  function renderEngines(engines) {
+    var hero = document.getElementById("engine-hero");
+    var list = document.getElementById("engine-list");
+    if (!engines || !engines.length) {
+      hero.innerHTML = '<div class="muted">Could not load engines.</div>';
+      list.innerHTML = "";
+      return;
+    }
+
+    var active = engines.filter(function (e) { return e.active; })[0] || engines[0];
+    hero.innerHTML = (
+      '<div class="engine-hero-label">Current Model</div>' +
+      '<div class="engine-hero-name">' + escapeHtml(active.name) + '</div>' +
+      '<div class="engine-hero-vendor">' + escapeHtml(active.vendor) + '</div>' +
+      '<div class="engine-badges">' +
+        '<span class="engine-badge">' + escapeHtml(active.vendor) + '</span>' +
+        '<span class="engine-badge">' + formatBytes(active.size) + '</span>' +
+        '<span class="engine-badge">Runs on your computer</span>' +
+      '</div>'
+    );
+
+    list.innerHTML = engines.map(function (engine) {
+      var badge = engine.active
+        ? '<span class="badge badge-active">Active</span>'
+        : '<span class="badge badge-ready">Ready</span>';
+      var action = engine.active ? "" :
+        '<button class="btn btn-primary engine-activate" data-key="' + engine.key + '">Activate</button>';
+      return (
+        '<div class="engine-item">' +
+          '<div class="engine-item-top">' +
+            '<span class="engine-item-name">' + escapeHtml(engine.name) + '</span>' + badge +
+          '</div>' +
+          '<div class="engine-item-desc">' + escapeHtml(engine.desc) + '</div>' +
+          '<div class="engine-item-note">' + escapeHtml(engine.perf_note) + '</div>' +
+          '<div class="engine-item-footer">' +
+            '<span class="engine-badges">' +
+              '<span class="engine-badge">' + escapeHtml(engine.vendor) + '</span>' +
+              '<span class="engine-badge">' + formatBytes(engine.size) + '</span>' +
+            '</span>' + action +
+          '</div>' +
+        '</div>'
+      );
+    }).join("");
+
+    list.querySelectorAll(".engine-activate").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var a = api();
+        if (!a) return;
+        var updates = {};
+        updates.stt_engine = btn.getAttribute("data-key");
+        a.set_settings(updates).then(function (snapshot) {
+          document.getElementById("voice-restart-chip").hidden = !(snapshot && snapshot.restart_required);
+          loadEngines();
+        });
+      });
+    });
+  }
+
+  function loadEngines() {
+    var a = api();
+    if (!a || typeof a.get_engines !== "function") return;
+    a.get_engines().then(renderEngines).catch(function () {
+      document.getElementById("engine-hero").innerHTML = '<div class="muted">Could not load engines.</div>';
+    });
+  }
+
+  function initVoiceEngine() {
+    var navItem = document.querySelector('.nav-item[data-pane="voice-engine"]');
+    if (navItem) navItem.addEventListener("click", loadEngines);
+    document.getElementById("voice-restart-now-btn").addEventListener("click", function () {
+      var a = api();
+      if (a && typeof a.restart_app === "function") a.restart_app();
+    });
+  }
+
+  // ---- AI Enhancements ----
+  function renderOllamaModels(models) {
+    var container = document.getElementById("ollama-model-list");
+    if (!models || !models.length) {
+      container.innerHTML = '<div class="notice-row">Ollama is not running</div>';
+      return;
+    }
+
+    container.innerHTML = models.map(function (model) {
+      var control = model.active
+        ? '<span class="badge badge-active">Active</span>'
+        : '<button class="btn ollama-select" data-name="' + escapeHtml(model.name) + '">Select</button>';
+      return (
+        '<div class="engine-item">' +
+          '<div class="engine-item-top">' +
+            '<span class="engine-item-name">' + escapeHtml(model.name) + '</span>' +
+            '<span class="engine-badges">' +
+              '<span class="engine-badge">' + model.size_gb + ' GB</span>' + control +
+            '</span>' +
+          '</div>' +
+        '</div>'
+      );
+    }).join("");
+
+    container.querySelectorAll(".ollama-select").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var a = api();
+        if (!a) return;
+        var updates = {};
+        updates.ollama_model = btn.getAttribute("data-name");
+        a.set_settings(updates).then(loadOllamaModels);
+      });
+    });
+  }
+
+  function loadOllamaModels() {
+    var a = api();
+    if (!a || typeof a.get_ollama_models !== "function") return;
+    a.get_ollama_models().then(renderOllamaModels).catch(function () {
+      document.getElementById("ollama-model-list").innerHTML = '<div class="notice-row">Ollama is not running</div>';
+    });
+  }
+
+  function loadAiEnhancements() {
+    callApi("get_settings").then(function (snapshot) {
+      document.getElementById("ai-refinement-toggle").checked = !!snapshot.ollama_refinement;
+      document.getElementById("ai-cleanup-badges").innerHTML = (
+        '<span class="engine-badge">' + escapeHtml(snapshot.ollama_model || "") + '</span>' +
+        '<span class="engine-badge">Runs on your computer</span>'
+      );
+    }).catch(function () {});
+    loadOllamaModels();
+  }
+
+  function initAiEnhancements() {
+    document.getElementById("ai-refinement-toggle").addEventListener("change", function (e) {
+      setSetting("ollama_refinement", e.target.checked);
+    });
+    var navItem = document.querySelector('.nav-item[data-pane="ai-enhancements"]');
+    if (navItem) navItem.addEventListener("click", loadAiEnhancements);
+  }
+
   // ---- History ----
   var historySelectedId = null;
   var historyRows = [];
@@ -581,6 +728,8 @@
     initMic();
     initLastResult();
     initHistory();
+    initVoiceEngine();
+    initAiEnhancements();
     initSettings();
     loadHealth();
     callApi("get_settings").then(function (snapshot) {

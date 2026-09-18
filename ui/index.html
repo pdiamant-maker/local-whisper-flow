@@ -92,8 +92,37 @@
       </div>
     </section>
 
-    <section class="pane" id="pane-voice-engine"><div class="placeholder">Coming in a later phase</div></section>
-    <section class="pane" id="pane-ai-enhancements"><div class="placeholder">Coming in a later phase</div></section>
+    <section class="pane" id="pane-voice-engine">
+      <h1 class="page-title">Voice Engine</h1>
+      <div class="restart-chip" id="voice-restart-chip" hidden>
+        <span>Restart required for this change to take effect.</span>
+        <button class="btn btn-primary" id="voice-restart-now-btn">Restart now</button>
+      </div>
+      <div class="card" id="engine-hero"><div class="muted">Loading...</div></div>
+      <div class="card">
+        <h2 class="card-title">Available Models</h2>
+        <div id="engine-list" class="engine-list"></div>
+      </div>
+    </section>
+
+    <section class="pane" id="pane-ai-enhancements">
+      <h1 class="page-title">AI Enhancements</h1>
+      <div class="card">
+        <div class="setting-row">
+          <div class="setting-row-text">
+            <div class="setting-row-title">Cleanup</div>
+            <div class="setting-row-subtitle">Removes filler words, fixes punctuation, keeps your exact words. Also obeys spoken commands: say new line, new paragraph, or make this a list. Nothing leaves your computer.</div>
+          </div>
+          <div class="setting-row-control"><label class="switch"><input type="checkbox" id="ai-refinement-toggle"><span class="slider"></span></label></div>
+        </div>
+        <div class="engine-badges" id="ai-cleanup-badges"></div>
+      </div>
+      <div class="card">
+        <h2 class="card-title">Cleanup Model</h2>
+        <div id="ollama-model-list" class="engine-list"><div class="muted">Loading...</div></div>
+        <div class="muted settings-note">qwen2.5:7b-instruct is the tested default. Smaller models drop words; larger reasoning models are too slow.</div>
+      </div>
+    </section>
 
     <section class="pane" id="pane-history">
       <div class="history-header">

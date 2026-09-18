@@ -152,6 +152,31 @@ LOG_FILE = APP_DIR / "local_flow.log"
 SHORTCUT_NAME = f"{APP_NAME}.lnk"
 SETTINGS_PATH = Path(__file__).resolve().parent / "settings.json"
 HISTORY_DB = APP_DIR / "history.db"
+HF_CACHE_DIR = Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _hf_cache_dirs(patterns: list[str]) -> list[Path]:
+    """Best-effort: HF cache subdirs matching any of the given glob patterns."""
+    if not HF_CACHE_DIR.exists():
+        return []
+    dirs = []
+    for pattern in patterns:
+        dirs.extend(d for d in HF_CACHE_DIR.glob(pattern) if d.is_dir())
+    return dirs
+
+
+def _hf_cache_dir_size(patterns: list[str]) -> Optional[int]:
+    """Total size in bytes of matching HF cache dirs, or None if none found/unreadable."""
+    dirs = _hf_cache_dirs(patterns)
+    if not dirs:
+        return None
+    total = 0
+    try:
+        for d in dirs:
+            total += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+    except OSError:
+        return None
+    return total
 
 SETTINGS_KEYS = {
     "hotkey": "HOTKEY",
@@ -257,6 +282,7 @@ Rules:
 - Keep every remaining word exactly as the speaker said it. Never substitute, reorder, or add words.
 - Do not fix grammar or word choice. Awkward phrasing stays as spoken.
 - Keep technical terms, names, numbers, and code-like text intact.
+- Execute spoken formatting commands instead of transcribing them: "new line" -> line break, "new paragraph" -> blank line, "make this a list" / "as a list" -> format the items as a dash list. Only apply when clearly spoken as a command.
 - Output ONLY the clean final statement.
 - Do not add commentary, explanations, quotes, markdown, prefixes, or suffixes."""
 
@@ -1226,6 +1252,50 @@ class UiApi:
         })
 
         return rows
+
+    def get_engines(self) -> list[dict]:
+        parakeet_dirs = _hf_cache_dirs(["*parakeet*"])
+        whisper_dirs = _hf_cache_dirs(["*whisper-large-v3-turbo*", "*large-v3-turbo*"])
+        return [
+            {
+                "key": "parakeet",
+                "name": "Parakeet TDT 0.6B v3",
+                "vendor": "NVIDIA",
+                "desc": "Fastest transcription, built-in punctuation. 25 European languages.",
+                "perf_note": "≈ 0.03 s per pass on this PC · WER 6.3% (Open ASR)",
+                "size": _hf_cache_dir_size(["*parakeet*"]),
+                "active": STT_ENGINE == "parakeet",
+                "downloaded": bool(parakeet_dirs),
+            },
+            {
+                "key": "whisper",
+                "name": "Whisper large-v3-turbo",
+                "vendor": "OpenAI",
+                "desc": "More robust on accents and noise. 100 languages. Slower.",
+                "perf_note": "≈ 0.25 s per pass on this PC · WER ~7.5%",
+                "size": _hf_cache_dir_size(["*whisper-large-v3-turbo*", "*large-v3-turbo*"]),
+                "active": STT_ENGINE == "whisper",
+                "downloaded": bool(whisper_dirs),
+            },
+        ]
+
+    def get_ollama_models(self) -> list[dict]:
+        try:
+            tags_url = OLLAMA_URL.rsplit("/", 1)[0] + "/tags"
+            with urllib.request.urlopen(tags_url, timeout=2) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            log(f"get_ollama_models: Ollama unreachable ({exc})")
+            return []
+
+        return [
+            {
+                "name": model.get("name", ""),
+                "size_gb": round(model.get("size", 0) / (1024 ** 3), 1),
+                "active": model.get("name") == OLLAMA_MODEL,
+            }
+            for model in data.get("models", [])
+        ]
 
     def get_status(self) -> dict:
         return {"current_status": current_status, "last_final_text": last_final_text}
