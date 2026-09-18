@@ -36,6 +36,8 @@ import json
 import math
 import os
 import queue
+import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -131,11 +133,16 @@ OVERLAY_SCALE = 1.0  # Multiplier applied to overlay panel size.
 ACTIVATION_MODE = "toggle"  # "toggle" (press to start/stop) or "hold" (record while held).
 PASTE_LAST_HOTKEY = ""  # Optional hotkey to re-paste the last transcript. Empty = disabled.
 
+ENABLE_HISTORY = True  # Record each dictation to history.db for the History tab.
+SAVE_AUDIO = False  # Also keep a copy of the WAV next to history.db (privacy-sensitive, off by default).
+AUDIO_CAP_MB = 1024  # Oldest saved WAVs are pruned once the audio/ folder exceeds this size.
+
 APP_DIR = Path(__file__).resolve().parent
 SCRIPT_PATH = Path(__file__).resolve()
 LOG_FILE = APP_DIR / "local_flow.log"
 SHORTCUT_NAME = f"{APP_NAME}.lnk"
 SETTINGS_PATH = Path(__file__).resolve().parent / "settings.json"
+HISTORY_DB = APP_DIR / "history.db"
 
 SETTINGS_KEYS = {
     "hotkey": "HOTKEY",
@@ -153,6 +160,9 @@ SETTINGS_KEYS = {
     "overlay_scale": "OVERLAY_SCALE",
     "activation_mode": "ACTIVATION_MODE",
     "paste_last_hotkey": "PASTE_LAST_HOTKEY",
+    "save_history": "ENABLE_HISTORY",
+    "save_audio": "SAVE_AUDIO",
+    "audio_cap_mb": "AUDIO_CAP_MB",
 }
 
 _settings_lock = threading.Lock()
@@ -637,6 +647,198 @@ def get_foreground_exe_path() -> Optional[str]:
         return None
 
 
+def get_foreground_window_title() -> str:
+    """Return the title of the current foreground window, best-effort empty string on failure."""
+    if os.name != "nt":
+        return ""
+
+    try:
+        user32 = ctypes.windll.user32
+        window = user32.GetForegroundWindow()
+        if not window:
+            return ""
+        length = user32.GetWindowTextLengthW(window)
+        if not length:
+            return ""
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(window, buffer, length + 1)
+        return buffer.value
+    except Exception:
+        return ""
+
+
+# -----------------------------
+# Dictation history (SQLite, private, off by default in the shipped log level)
+# -----------------------------
+
+_history_lock = threading.Lock()
+_history_conn: Optional[sqlite3.Connection] = None
+
+_HISTORY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS dictations (
+    id INTEGER PRIMARY KEY,
+    ts REAL,
+    app TEXT,
+    window_title TEXT,
+    raw TEXT,
+    final TEXT,
+    chars INTEGER,
+    ai_processed INTEGER,
+    model TEXT,
+    audio_secs REAL,
+    audio_path TEXT,
+    whisper_secs REAL,
+    llm_secs REAL
+)
+"""
+
+
+def _get_history_conn() -> sqlite3.Connection:
+    """Module-level SQLite connection, created on first use. Caller holds _history_lock."""
+    global _history_conn
+    if _history_conn is None:
+        _history_conn = sqlite3.connect(str(HISTORY_DB), check_same_thread=False)
+        _history_conn.execute("PRAGMA journal_mode=WAL")
+        _history_conn.execute(_HISTORY_SCHEMA)
+        _history_conn.commit()
+    return _history_conn
+
+
+def _prune_audio_dir(audio_dir: Path) -> None:
+    """Delete oldest WAVs until the folder is back under AUDIO_CAP_MB."""
+    try:
+        files = sorted(audio_dir.glob("*.wav"), key=lambda p: p.stat().st_mtime)
+        total = sum(f.stat().st_size for f in files)
+        cap_bytes = AUDIO_CAP_MB * 1024 * 1024
+        for f in files:
+            if total <= cap_bytes:
+                break
+            total -= f.stat().st_size
+            f.unlink(missing_ok=True)
+    except Exception as exc:
+        log(f"Audio pruning failed (non-fatal): {exc}")
+
+
+def record_history(
+    raw_text: str,
+    clean_text: str,
+    transcribe_seconds: float,
+    ollama_seconds: float,
+    audio_seconds: float,
+    wav_path: Optional[Path],
+) -> None:
+    """Save one dictation to history.db. Never raises into the dictation flow."""
+    if not ENABLE_HISTORY:
+        return
+
+    try:
+        ts = time.time()
+        exe_path = get_foreground_exe_path()
+        app = Path(exe_path).stem if exe_path else ""
+        window_title = get_foreground_window_title()
+        model = OLLAMA_MODEL if ENABLE_OLLAMA_REFINEMENT else (
+            PARAKEET_MODEL_NAME if STT_ENGINE == "parakeet" else WHISPER_MODEL_NAME
+        )
+
+        audio_path = ""
+        if SAVE_AUDIO and wav_path and wav_path.exists():
+            audio_dir = APP_DIR / "audio"
+            audio_dir.mkdir(exist_ok=True)
+            dest = audio_dir / f"{int(ts * 1000)}.wav"
+            shutil.copyfile(wav_path, dest)
+            audio_path = str(dest)
+            _prune_audio_dir(audio_dir)
+
+        with _history_lock:
+            conn = _get_history_conn()
+            conn.execute(
+                "INSERT INTO dictations "
+                "(ts, app, window_title, raw, final, chars, ai_processed, model, audio_secs, audio_path, whisper_secs, llm_secs) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ts, app, window_title, raw_text, clean_text, len(clean_text),
+                    1 if ENABLE_OLLAMA_REFINEMENT else 0, model, audio_seconds,
+                    audio_path or None, transcribe_seconds, ollama_seconds,
+                ),
+            )
+            conn.commit()
+    except Exception as exc:
+        log(f"History recording failed (non-fatal): {exc}")
+
+
+def history_list_rows(query: str, limit: int) -> list[dict]:
+    try:
+        with _history_lock:
+            conn = _get_history_conn()
+            like = f"%{query}%"
+            if query:
+                cursor = conn.execute(
+                    "SELECT id, ts, app, final, ai_processed, audio_path FROM dictations "
+                    "WHERE raw LIKE ? OR final LIKE ? ORDER BY ts DESC LIMIT ?",
+                    (like, like, limit),
+                )
+            else:
+                cursor = conn.execute(
+                    "SELECT id, ts, app, final, ai_processed, audio_path FROM dictations "
+                    "ORDER BY ts DESC LIMIT ?",
+                    (limit,),
+                )
+            rows = cursor.fetchall()
+        return [
+            {
+                "id": row_id,
+                "ts": ts,
+                "app": app or "",
+                "snippet": (final or "")[:90],
+                "ai": bool(ai_processed),
+                "has_audio": bool(audio_path),
+            }
+            for row_id, ts, app, final, ai_processed, audio_path in rows
+        ]
+    except Exception as exc:
+        log(f"history_list failed: {exc}")
+        return []
+
+
+def history_get_row(row_id: int) -> Optional[dict]:
+    try:
+        with _history_lock:
+            conn = _get_history_conn()
+            cursor = conn.execute("SELECT * FROM dictations WHERE id = ?", (row_id,))
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            columns = [d[0] for d in cursor.description]
+        return dict(zip(columns, row))
+    except Exception as exc:
+        log(f"history_get failed: {exc}")
+        return None
+
+
+def history_delete_row(row_id: int) -> bool:
+    try:
+        with _history_lock:
+            conn = _get_history_conn()
+            conn.execute("DELETE FROM dictations WHERE id = ?", (row_id,))
+            conn.commit()
+        return True
+    except Exception as exc:
+        log(f"history_delete failed: {exc}")
+        return False
+
+
+def history_clear_rows() -> bool:
+    try:
+        with _history_lock:
+            conn = _get_history_conn()
+            conn.execute("DELETE FROM dictations")
+            conn.commit()
+        return True
+    except Exception as exc:
+        log(f"history_clear failed: {exc}")
+        return False
+
+
 def get_app_icon_image(exe_path: str):
     """Extract a 24x24 PIL image of an exe's icon. Returns None when unavailable."""
     global _icon_warning_logged
@@ -1014,6 +1216,23 @@ class UiApi:
     def open_settings_placeholder(self) -> str:
         return "later phase"
 
+    def history_list(self, query: str = "", limit: int = 200) -> list[dict]:
+        return history_list_rows(query or "", limit)
+
+    def history_get(self, id: int) -> Optional[dict]:
+        return history_get_row(id)
+
+    def history_delete(self, id: int) -> bool:
+        return history_delete_row(id)
+
+    def history_clear(self) -> bool:
+        return history_clear_rows()
+
+    def history_paste(self, id: int) -> None:
+        row = history_get_row(id)
+        if row:
+            paste_text(row.get("final") or "")
+
 
 def open_main_window() -> None:
     """Show the main window created on the main thread at startup."""
@@ -1222,7 +1441,7 @@ def stop_recording() -> None:
     worker.start()
 
 
-def write_temp_wav() -> Path:
+def write_temp_wav() -> tuple[Path, float]:
     """Save recorded chunks to a temporary WAV file in the local directory."""
     audio = np.concatenate(recorded_chunks, axis=0)
 
@@ -1236,7 +1455,7 @@ def write_temp_wav() -> Path:
     temp_name = f"local_flow_{int(time.time())}.wav"
     wav_path = Path.cwd() / temp_name
     sf.write(wav_path, audio, SAMPLE_RATE, subtype="PCM_16")
-    return wav_path
+    return wav_path, duration
 
 
 def transcribe_audio(source, quiet: bool = False) -> str:
@@ -1434,11 +1653,12 @@ def process_recording() -> None:
     global is_processing, last_metrics_text, last_final_text, live_partial_text
 
     wav_path: Optional[Path] = None
+    audio_seconds = 0.0
     status_after_processing = "idle"
     started_at = time.perf_counter()
     try:
         stage_started = time.perf_counter()
-        wav_path = write_temp_wav()
+        wav_path, audio_seconds = write_temp_wav()
         log(f"Saved temporary WAV: {wav_path.name} ({time.perf_counter() - stage_started:.2f}s)")
 
         stage_started = time.perf_counter()
@@ -1467,6 +1687,7 @@ def process_recording() -> None:
             last_metrics_text = (
                 f"total {total_seconds:.1f}s  ·  whisper {transcribe_seconds:.1f}  ·  llm {ollama_seconds:.1f}"
             )
+        record_history(raw_text, clean_text, transcribe_seconds, ollama_seconds, audio_seconds, wav_path)
 
     except Exception as exc:
         status_after_processing = "error"

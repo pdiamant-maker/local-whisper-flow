@@ -126,6 +126,184 @@
     });
   }
 
+  // ---- History ----
+  var historySelectedId = null;
+  var historyRows = [];
+
+  function relativeTime(ts) {
+    var seconds = Math.max(0, (Date.now() / 1000) - ts);
+    if (seconds < 60) return "just now";
+    var minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return minutes + "m ago";
+    var hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + "h ago";
+    var days = Math.floor(hours / 24);
+    if (days < 7) return days + "d ago";
+    return new Date(ts * 1000).toLocaleDateString();
+  }
+
+  function renderHistoryList() {
+    var list = document.getElementById("history-list");
+    var count = document.getElementById("history-count");
+    count.textContent = historyRows.length + " saved dictation" + (historyRows.length === 1 ? "" : "s");
+
+    if (!historyRows.length) {
+      list.innerHTML = '<div class="muted">No dictations yet.</div>';
+      return;
+    }
+
+    list.innerHTML = historyRows.map(function (row) {
+      var selected = row.id === historySelectedId ? " selected" : "";
+      var badge = row.ai ? '<span class="ai-badge">AI</span>' : "";
+      return (
+        '<button class="history-row' + selected + '" data-id="' + row.id + '">' +
+          '<div class="history-row-top">' +
+            '<span class="history-row-app">' + escapeHtml(row.app || "Unknown app") + '</span>' +
+            badge +
+          '</div>' +
+          '<div class="history-row-snippet">' + escapeHtml(row.snippet || "(empty)") + '</div>' +
+          '<div class="history-row-time">' + relativeTime(row.ts) + '</div>' +
+        '</button>'
+      );
+    }).join("");
+
+    list.querySelectorAll(".history-row").forEach(function (el) {
+      el.addEventListener("click", function () {
+        selectHistoryItem(parseInt(el.getAttribute("data-id"), 10));
+      });
+    });
+  }
+
+  function loadHistoryList() {
+    var query = document.getElementById("history-search").value.trim();
+    var a = api();
+    if (!a || typeof a.history_list !== "function") return;
+    a.history_list(query, 200).then(function (rows) {
+      historyRows = rows || [];
+      if (historySelectedId !== null && !historyRows.some(function (r) { return r.id === historySelectedId; })) {
+        historySelectedId = null;
+        renderHistoryDetail(null);
+      }
+      renderHistoryList();
+    }).catch(function () {});
+  }
+
+  function detailTile(label, value) {
+    return (
+      '<div class="detail-tile">' +
+        '<div class="detail-tile-label">' + escapeHtml(label) + '</div>' +
+        '<div class="detail-tile-value">' + escapeHtml(value) + '</div>' +
+      '</div>'
+    );
+  }
+
+  function renderHistoryDetail(row) {
+    var pane = document.getElementById("history-detail");
+    if (!row) {
+      pane.innerHTML = '<div class="placeholder">Select a dictation to see details.</div>';
+      return;
+    }
+
+    var tiles = [
+      detailTile("Application", row.app || "Unknown"),
+      detailTile("Window", row.window_title || "—"),
+      detailTile("Characters", String(row.chars || 0)),
+      detailTile("AI Processed", row.ai_processed ? "Yes" : "No"),
+    ];
+    if (row.model) tiles.push(detailTile("Model", row.model));
+    if (row.audio_secs) tiles.push(detailTile("Audio", row.audio_secs.toFixed(1) + "s"));
+    tiles.push(detailTile("Timestamp", new Date(row.ts * 1000).toLocaleString()));
+
+    var originalBlock = "";
+    if (row.raw && row.raw !== row.final) {
+      originalBlock = (
+        '<div class="detail-label">Original Transcription</div>' +
+        '<div class="detail-text-box">' + escapeHtml(row.raw) + '</div>'
+      );
+    }
+
+    pane.innerHTML = (
+      '<div class="detail-date">' + new Date(row.ts * 1000).toLocaleString() + '</div>' +
+      '<div class="detail-label">Final Text</div>' +
+      '<div class="detail-text-box">' + escapeHtml(row.final || "(empty)") + '</div>' +
+      originalBlock +
+      '<div class="detail-tiles">' + tiles.join("") + '</div>' +
+      '<div class="detail-actions">' +
+        '<button class="btn" id="history-copy-final">Copy Final</button>' +
+        '<button class="btn btn-primary" id="history-paste">Paste at Cursor</button>' +
+        '<button class="btn btn-danger" id="history-delete-entry">Delete Entry</button>' +
+      '</div>'
+    );
+
+    document.getElementById("history-copy-final").addEventListener("click", function () {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(row.final || "");
+      }
+    });
+    document.getElementById("history-paste").addEventListener("click", function () {
+      callApi_history_paste(row.id);
+    });
+    document.getElementById("history-delete-entry").addEventListener("click", function () {
+      var a = api();
+      if (!a) return;
+      a.history_delete(row.id).then(function () {
+        loadHistoryList();
+      });
+    });
+  }
+
+  function callApi_history_paste(id) {
+    var a = api();
+    if (!a || typeof a.history_paste !== "function") return;
+    a.history_paste(id);
+  }
+
+  function selectHistoryItem(id) {
+    historySelectedId = id;
+    renderHistoryList();
+    var a = api();
+    if (!a || typeof a.history_get !== "function") return;
+    a.history_get(id).then(renderHistoryDetail).catch(function () {});
+  }
+
+  function initHistory() {
+    document.getElementById("history-search").addEventListener("input", debounce(loadHistoryList, 200));
+    document.getElementById("history-refresh").addEventListener("click", loadHistoryList);
+
+    var confirmBar = document.getElementById("history-confirm-bar");
+    document.getElementById("history-delete-all").addEventListener("click", function () {
+      confirmBar.hidden = false;
+    });
+    document.getElementById("history-confirm-no").addEventListener("click", function () {
+      confirmBar.hidden = true;
+    });
+    document.getElementById("history-confirm-yes").addEventListener("click", function () {
+      confirmBar.hidden = true;
+      var a = api();
+      if (!a) return;
+      a.history_clear().then(function () {
+        historySelectedId = null;
+        loadHistoryList();
+        renderHistoryDetail(null);
+      });
+    });
+
+    // Load on nav activation, not on a poll.
+    var historyNavItem = document.querySelector('.nav-item[data-pane="history"]');
+    if (historyNavItem) {
+      historyNavItem.addEventListener("click", loadHistoryList);
+    }
+  }
+
+  function debounce(fn, wait) {
+    var timer = null;
+    return function () {
+      var args = arguments;
+      clearTimeout(timer);
+      timer = setTimeout(function () { fn.apply(null, args); }, wait);
+    };
+  }
+
   var initialized = false;
   function init() {
     if (initialized) return;
@@ -133,6 +311,7 @@
     initNav();
     initMic();
     initLastResult();
+    initHistory();
     loadHealth();
   }
 

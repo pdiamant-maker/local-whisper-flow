@@ -29,3 +29,9 @@ Screenshot*.png
 
 # Internal planning docs (kept local, not published)
 docs/superpowers/
+
+# Dictation history (private)
+history.db
+history.db-wal
+history.db-shm
+audio/

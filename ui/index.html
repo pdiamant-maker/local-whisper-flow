@@ -94,7 +94,38 @@
 
     <section class="pane" id="pane-voice-engine"><div class="placeholder">Coming in a later phase</div></section>
     <section class="pane" id="pane-ai-enhancements"><div class="placeholder">Coming in a later phase</div></section>
-    <section class="pane" id="pane-history"><div class="placeholder">Coming in a later phase</div></section>
+
+    <section class="pane" id="pane-history">
+      <div class="history-header">
+        <div>
+          <h1 class="page-title">History</h1>
+          <div class="history-subtitle" id="history-count">0 saved dictations</div>
+        </div>
+        <div class="history-header-actions">
+          <button class="btn" id="history-refresh">Refresh</button>
+          <button class="btn btn-danger" id="history-delete-all">Delete All</button>
+        </div>
+      </div>
+
+      <div class="confirm-bar" id="history-confirm-bar" hidden>
+        <span>Delete all history? This cannot be undone.</span>
+        <div class="confirm-bar-actions">
+          <button class="btn btn-danger" id="history-confirm-yes">Delete All</button>
+          <button class="btn" id="history-confirm-no">Cancel</button>
+        </div>
+      </div>
+
+      <div class="history-layout">
+        <div class="history-list-pane">
+          <input type="text" class="history-search" id="history-search" placeholder="Search dictations...">
+          <div class="history-list" id="history-list"></div>
+        </div>
+        <div class="history-detail-pane" id="history-detail">
+          <div class="placeholder">Select a dictation to see details.</div>
+        </div>
+      </div>
+    </section>
+
     <section class="pane" id="pane-insights"><div class="placeholder">Coming in a later phase</div></section>
     <section class="pane" id="pane-custom-dictionary"><div class="placeholder">Coming in a later phase</div></section>
   </main>
