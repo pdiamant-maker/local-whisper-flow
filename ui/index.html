@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Flow</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <svg class="brand-icon" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+        <rect x="1" y="1" width="38" height="38" rx="10" fill="#0D1117" stroke="#2A3340"/>
+        <line x1="10" y1="24" x2="10" y2="16" stroke="#2DB45C" stroke-width="3" stroke-linecap="round"/>
+        <line x1="15.5" y1="27" x2="15.5" y2="13" stroke="#2DB45C" stroke-width="3" stroke-linecap="round"/>
+        <line x1="21" y1="21" x2="21" y2="19" stroke="#2DB45C" stroke-width="3" stroke-linecap="round"/>
+        <line x1="26.5" y1="29" x2="26.5" y2="11" stroke="#2DB45C" stroke-width="3" stroke-linecap="round"/>
+        <line x1="32" y1="25" x2="32" y2="15" stroke="#2DB45C" stroke-width="3" stroke-linecap="round"/>
+      </svg>
+      <span class="brand-name">Local Flow</span>
+    </div>
+
+    <div class="nav-section-label">Main</div>
+    <nav class="nav">
+      <button class="nav-item active" data-pane="home">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M4 11.5 12 4l8 7.5M6 10v9a1 1 0 0 0 1 1h4v-6h2v6h4a1 1 0 0 0 1-1v-9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Home</span>
+      </button>
+      <button class="nav-item" data-pane="voice-engine">
+        <svg viewBox="0 0 24 24" fill="none"><rect x="9" y="3" width="6" height="11" rx="3" stroke="currentColor" stroke-width="1.8"/><path d="M6 11a6 6 0 0 0 12 0M12 19v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <span>Voice Engine</span>
+      </button>
+      <button class="nav-item" data-pane="ai-enhancements">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2 2M16.4 16.4l2 2M5.6 18.4l2-2M16.4 7.6l2-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="1.8"/></svg>
+        <span>AI Enhancements</span>
+      </button>
+      <button class="nav-item" data-pane="history">
+        <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.8"/><path d="M12 7.5V12l3 2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>History</span>
+      </button>
+      <button class="nav-item" data-pane="insights">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M4 20V10M11 20V4M18 20v-7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <span>Insights</span>
+      </button>
+      <button class="nav-item" data-pane="custom-dictionary">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M6 4h11a1 1 0 0 1 1 1v15l-6-3-6 3V5a1 1 0 0 1 1-1v0Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+        <span>Custom Dictionary</span>
+      </button>
+    </nav>
+
+    <div class="profile-card">
+      <div class="avatar">PD</div>
+      <div class="profile-text">
+        <div class="profile-name">Petros Diamant</div>
+        <div class="profile-subtitle">Profile &amp; settings</div>
+      </div>
+      <button class="icon-btn" id="settings-gear" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.8"/><path d="M19.4 13.5a7.6 7.6 0 0 0 0-3l2-1.4-2-3.4-2.3.9a7.6 7.6 0 0 0-2.6-1.5L14 2.5h-4l-.5 2.6a7.6 7.6 0 0 0-2.6 1.5l-2.3-.9-2 3.4 2 1.4a7.6 7.6 0 0 0 0 3l-2 1.4 2 3.4 2.3-.9c.77.66 1.65 1.17 2.6 1.5l.5 2.6h4l.5-2.6a7.6 7.6 0 0 0 2.6-1.5l2.3.9 2-3.4-2-1.4Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <main class="content">
+    <section class="pane active" id="pane-home">
+      <h1 class="page-title">Home</h1>
+
+      <div class="card">
+        <h2 class="card-title">Quick Setup</h2>
+        <div id="health-rows" class="health-rows">
+          <div class="muted">Loading...</div>
+        </div>
+      </div>
+
+      <div class="card mic-card">
+        <button class="mic-button" id="mic-button">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M12 15a3.5 3.5 0 0 0 3.5-3.5V6a3.5 3.5 0 0 0-7 0v5.5A3.5 3.5 0 0 0 12 15Z" stroke="white" stroke-width="1.8"/><path d="M6 11.5a6 6 0 0 0 12 0M12 17.5V21" stroke="white" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
+        <div class="mic-text">
+          <div class="mic-title" id="mic-title">Ready to dictate</div>
+          <div class="mic-subtitle" id="mic-subtitle">Press Ctrl+Shift+J anywhere or start here</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">Last Result</h2>
+        <div class="last-result-text" id="last-result-text">Nothing dictated yet.</div>
+        <div class="last-result-actions">
+          <button class="btn" id="copy-btn">Copy</button>
+          <button class="btn btn-primary" id="paste-btn">Paste</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="pane" id="pane-voice-engine"><div class="placeholder">Coming in a later phase</div></section>
+    <section class="pane" id="pane-ai-enhancements"><div class="placeholder">Coming in a later phase</div></section>
+    <section class="pane" id="pane-history"><div class="placeholder">Coming in a later phase</div></section>
+    <section class="pane" id="pane-insights"><div class="placeholder">Coming in a later phase</div></section>
+    <section class="pane" id="pane-custom-dictionary"><div class="placeholder">Coming in a later phase</div></section>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

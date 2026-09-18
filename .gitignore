@@ -18,6 +18,12 @@ openwhispr-ollama-setup-prompt.md
 summary.md
 local_flow_launcher.pyw
 
+# Per-machine state and local tooling
+settings.json
+.venv/
+.obsidian/
+Screenshot*.png
+
 # Impeccable working dir
 .impeccable/
 

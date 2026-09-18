@@ -126,11 +126,95 @@ OVERLAY_BOTTOM_MARGIN = 80
 TRANSCRIPTION_LANGUAGE = "en"  # Skips language detection for faster English dictation.
 HIDE_CONSOLE_ON_START = os.environ.get("LOCAL_FLOW_DEBUG_CONSOLE") != "1"
 SHOW_METRICS = True  # Show a live "total 0.7s · whisper 0.3 · llm 0.1" line on the overlay after each dictation.
+ENABLE_LIVE_PREVIEW = True  # Show the streaming partial transcript on the overlay.
+OVERLAY_SCALE = 1.0  # Multiplier applied to overlay panel size.
+ACTIVATION_MODE = "toggle"  # "toggle" (press to start/stop) or "hold" (record while held).
+PASTE_LAST_HOTKEY = ""  # Optional hotkey to re-paste the last transcript. Empty = disabled.
 
 APP_DIR = Path(__file__).resolve().parent
 SCRIPT_PATH = Path(__file__).resolve()
 LOG_FILE = APP_DIR / "local_flow.log"
 SHORTCUT_NAME = f"{APP_NAME}.lnk"
+SETTINGS_PATH = Path(__file__).resolve().parent / "settings.json"
+
+SETTINGS_KEYS = {
+    "hotkey": "HOTKEY",
+    "stt_engine": "STT_ENGINE",
+    "parakeet_model": "PARAKEET_MODEL_NAME",
+    "whisper_model": "WHISPER_MODEL_NAME",
+    "whisper_device": "WHISPER_DEVICE",
+    "whisper_compute_type": "WHISPER_COMPUTE_TYPE",
+    "ollama_model": "OLLAMA_MODEL",
+    "ollama_refinement": "ENABLE_OLLAMA_REFINEMENT",
+    "tray_icon": "ENABLE_TRAY_ICON",
+    "floating_overlay": "ENABLE_FLOATING_OVERLAY",
+    "live_preview": "ENABLE_LIVE_PREVIEW",
+    "live_interval_seconds": "LIVE_TRANSCRIBE_INTERVAL_SECONDS",
+    "overlay_scale": "OVERLAY_SCALE",
+    "activation_mode": "ACTIVATION_MODE",
+    "paste_last_hotkey": "PASTE_LAST_HOTKEY",
+}
+
+_settings_lock = threading.Lock()
+
+
+def _settings_snapshot() -> dict:
+    """Current values of all whitelisted globals, keyed by their JSON key."""
+    return {json_key: globals()[target] for json_key, target in SETTINGS_KEYS.items()}
+
+
+def _rebind_live_interval_if_default(explicit_keys: set[str]) -> None:
+    # Keep the parakeet 0.25 / whisper 1.0 default rule, unless the file set it explicitly.
+    if "live_interval_seconds" not in explicit_keys:
+        globals()["LIVE_TRANSCRIBE_INTERVAL_SECONDS"] = 0.25 if STT_ENGINE == "parakeet" else 1.0
+
+
+def load_settings() -> None:
+    with _settings_lock:
+        if not SETTINGS_PATH.exists():
+            try:
+                SETTINGS_PATH.write_text(json.dumps(_settings_snapshot(), indent=2), encoding="utf-8")
+            except OSError as exc:
+                print(f"[settings] could not create {SETTINGS_PATH}: {exc}")
+            return
+
+        try:
+            data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"[settings] could not read {SETTINGS_PATH}: {exc}; using defaults")
+            return
+
+        explicit_keys: set[str] = set()
+        for json_key, target in SETTINGS_KEYS.items():
+            if json_key not in data:
+                continue
+            value = data[json_key]
+            default = globals()[target]
+            if type(value) is not type(default):
+                print(f"[settings] ignoring {json_key!r}: expected {type(default).__name__}, got {type(value).__name__}")
+                continue
+            globals()[target] = value
+            explicit_keys.add(json_key)
+
+        _rebind_live_interval_if_default(explicit_keys)
+
+
+def save_settings(updates: dict) -> None:
+    with _settings_lock:
+        try:
+            current = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            current = {}
+
+        current.update({k: v for k, v in updates.items() if k in SETTINGS_KEYS})
+        SETTINGS_PATH.write_text(json.dumps(current, indent=2), encoding="utf-8")
+
+        explicit_keys: set[str] = set()
+        for json_key, target in SETTINGS_KEYS.items():
+            if json_key in current:
+                globals()[target] = current[json_key]
+                explicit_keys.add(json_key)
+        _rebind_live_interval_if_default(explicit_keys)
 
 
 SYSTEM_PROMPT = """You clean raw speech-to-text dictation.
@@ -166,7 +250,9 @@ shutdown_event = threading.Event()
 current_status = "starting"
 show_idle_overlay_until = 0.0
 last_metrics_text = ""  # Populated after each dictation when SHOW_METRICS is on.
+last_final_text = ""  # The most recent pasted/clean transcript, shown in the main window's Last Result card.
 live_partial_text = ""  # ponytail: plain str, assignment is atomic; a stale frame costs nothing.
+webview_window = None  # The pywebview main window, created hidden on the main thread at startup.
 _dll_directory_handles = []
 _app_icon_cache: dict[str, object] = {}  # exe path -> PIL Image (or None when unavailable)
 _icon_warning_logged = False
@@ -840,6 +926,105 @@ def quit_app(icon=None, item=None) -> None:
         listener.stop()
     if tray_icon is not None:
         tray_icon.stop()
+    if webview_window is not None:
+        try:
+            webview_window.destroy()
+        except Exception:
+            pass
+
+
+class UiApi:
+    """js_api exposed to ui/index.html: thin wrappers around existing app functions."""
+
+    def get_health(self) -> list[dict]:
+        rows = []
+
+        if STT_ENGINE == "parakeet":
+            model_ok = parakeet_model is not None
+            model_name = PARAKEET_MODEL_NAME
+        else:
+            model_ok = whisper_model is not None
+            model_name = WHISPER_MODEL_NAME
+        rows.append({
+            "title": "Voice model ready",
+            "subtitle": model_name if model_ok else f"{model_name} (still loading)",
+            "ok": model_ok,
+            "badge": "Ready" if model_ok else "Loading",
+        })
+
+        try:
+            device_info = sd.query_devices(kind="input")
+            mic_name = device_info["name"]
+            rows.append({"title": "Microphone access", "subtitle": mic_name, "ok": True, "badge": "Ready"})
+        except Exception as exc:
+            rows.append({
+                "title": "Microphone access",
+                "subtitle": f"No input device found ({exc})",
+                "ok": False,
+                "badge": "Warning",
+            })
+
+        rows.append({
+            "title": "Speech engine",
+            "subtitle": f"Runs on your computer · {STT_ENGINE}",
+            "ok": True,
+            "badge": "Ready",
+        })
+
+        ollama_ok = False
+        try:
+            tags_url = OLLAMA_URL.rsplit("/", 1)[0] + "/tags"
+            with urllib.request.urlopen(tags_url, timeout=2) as response:
+                ollama_ok = response.status == 200
+        except Exception:
+            ollama_ok = False
+        rows.append({
+            "title": "Cleanup model",
+            "subtitle": f"{OLLAMA_MODEL}" if ollama_ok else f"Ollama unreachable ({OLLAMA_MODEL})",
+            "ok": ollama_ok,
+            "badge": "Ready" if ollama_ok else "Warning",
+        })
+
+        rows.append({
+            "title": "Hotkey active",
+            "subtitle": HOTKEY,
+            "ok": True,
+            "badge": "Ready",
+        })
+
+        return rows
+
+    def get_status(self) -> dict:
+        return {"current_status": current_status, "last_final_text": last_final_text}
+
+    def toggle_recording(self) -> None:
+        toggle_recording()
+
+    def copy_last(self) -> bool:
+        try:
+            pyperclip.copy(last_final_text)
+            return True
+        except Exception as exc:
+            log(f"Could not copy last result: {exc}")
+            return False
+
+    def paste_last(self) -> None:
+        paste_text(last_final_text)
+
+    def open_settings_placeholder(self) -> str:
+        return "later phase"
+
+
+def open_main_window() -> None:
+    """Show the main window created on the main thread at startup."""
+    if webview_window is None:
+        log("Main window is not ready yet.")
+        return
+    try:
+        webview_window.show()
+        webview_window.restore()
+    except Exception as exc:
+        log(f"Could not show the main window: {exc}")
 
 
 def start_tray_icon() -> None:
@@ -854,6 +1039,7 @@ def start_tray_icon() -> None:
         return
 
     menu = pystray.Menu(
+        pystray.MenuItem("Open Local Flow", lambda icon, item: open_main_window()),
         pystray.MenuItem("Toggle recording", lambda icon, item: toggle_recording()),
         pystray.MenuItem("Settings...", open_settings_window),
         pystray.MenuItem("Quit Local Flow", quit_app),
@@ -1245,7 +1431,7 @@ def paste_text(text: str) -> None:
 
 def process_recording() -> None:
     """Save, transcribe, polish, and paste the captured recording."""
-    global is_processing, last_metrics_text, live_partial_text
+    global is_processing, last_metrics_text, last_final_text, live_partial_text
 
     wav_path: Optional[Path] = None
     status_after_processing = "idle"
@@ -1273,6 +1459,7 @@ def process_recording() -> None:
             clean_text = raw_text
 
         log(f"Final text ({ollama_seconds:.2f}s): {clean_text}")
+        last_final_text = clean_text
         paste_text(clean_text)
         total_seconds = time.perf_counter() - started_at
         log(f"Total processing time: {total_seconds:.2f}s")
@@ -1337,6 +1524,10 @@ def print_startup_banner() -> None:
 
 
 if __name__ == "__main__":
+    _settings_existed = SETTINGS_PATH.exists()
+    load_settings()
+    log("Settings loaded from settings.json" if _settings_existed else "Settings file created with defaults")
+
     hide_console_window()
     print_startup_banner()
     start_floating_overlay()
@@ -1359,21 +1550,63 @@ if __name__ == "__main__":
     hotkey = keyboard.HotKey(keyboard.HotKey.parse(HOTKEY), toggle_recording)
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
 
+    # pywebview must create its window and run its GUI loop on the main thread on Windows.
+    # It owns this thread until its window is destroyed (the quit path), so the pynput
+    # listener (which runs its own thread) is started from on_webview_ready instead of here.
+    webview_ran = False
     try:
-        listener.start()
-        listener.join()
-    except KeyboardInterrupt:
-        log("Exiting Local Flow.")
-    finally:
-        shutdown_event.set()
-        if input_stream is not None:
-            try:
-                input_stream.stop()
-                input_stream.close()
-            except Exception:
-                pass
-        if tray_icon is not None:
-            try:
-                tray_icon.stop()
-            except Exception:
-                pass
+        import webview
+
+        html_path = APP_DIR / "ui" / "index.html"
+        webview_window = webview.create_window(
+            "Local Flow",
+            url=html_path.as_uri(),
+            js_api=UiApi(),
+            width=1280,
+            height=900,
+            min_size=(1000, 700),
+            background_color="#0B0E13",
+            hidden=True,
+        )
+
+        def on_closing() -> bool:
+            webview_window.hide()
+            return False
+
+        webview_window.events.closing += on_closing
+
+        def on_webview_ready() -> None:
+            listener.start()
+            if os.environ.get("LOCAL_FLOW_OPEN_UI") == "1":  # debug: open the main window on start
+                open_main_window()
+
+        webview.start(func=on_webview_ready)
+        webview_ran = True
+    except Exception as exc:
+        log(f"Main window unavailable, dictation continues without it: {exc}")
+        webview_window = None
+
+    if webview_ran:
+        # webview.start() returned because its window was destroyed (the quit path).
+        if not shutdown_event.is_set():
+            quit_app()
+    else:
+        try:
+            listener.start()
+            listener.join()
+        except KeyboardInterrupt:
+            log("Exiting Local Flow.")
+        finally:
+            shutdown_event.set()
+
+    if input_stream is not None:
+        try:
+            input_stream.stop()
+            input_stream.close()
+        except Exception:
+            pass
+    if tray_icon is not None:
+        try:
+            tray_icon.stop()
+        except Exception:
+            pass

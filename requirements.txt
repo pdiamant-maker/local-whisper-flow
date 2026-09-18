@@ -13,6 +13,8 @@ onnx-asr[gpu,hub]
 onnxruntime-gpu==1.22.0
 nvidia-cuda-runtime-cu12
 nvidia-cufft-cu12
+# Main window UI
+pywebview
 # Optional: system tray icon
 pystray==0.19.5
 pillow==12.2.0
