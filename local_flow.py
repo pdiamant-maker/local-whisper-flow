@@ -2,13 +2,21 @@
 Local Flow: a lightweight Windows dictation helper.
 
 Hotkey:
-    Ctrl + Shift + K toggles recording on/off.
+    Ctrl + Shift + J toggles recording on/off.
 
 Install dependencies:
     pip install faster-whisper sounddevice soundfile pynput pyperclip pyautogui numpy
 
 Optional tray icon:
     pip install pystray pillow
+
+Optional target-app icon in the overlay:
+    pip install pywin32
+
+Overlay:
+    A dark rounded panel at the bottom center of the screen showing the target
+    app icon, the live (partial) transcript while you speak, and the animated
+    waveform bars with the current status.
 
 Notes:
     - Ollama must already be running at OLLAMA_URL.
@@ -18,6 +26,7 @@ Notes:
 
 from __future__ import annotations
 
+import ctypes
 import json
 import math
 import os
@@ -60,7 +69,7 @@ except ImportError:
 # =============================================================================
 
 APP_NAME = "Local Flow"
-HOTKEY = "<ctrl>+<shift>+k"
+HOTKEY = "<ctrl>+<shift>+j"
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "qwen2.5:7b-instruct"  # Higher polish. Use "qwen2.5:3b-instruct" for lower latency.
@@ -92,6 +101,12 @@ ENABLE_TRAY_ICON = True
 ENABLE_FLOATING_OVERLAY = True
 FLOATING_OVERLAY_SHOW_WHEN_IDLE = False
 STARTUP_READY_OVERLAY_SECONDS = 4
+OVERLAY_IDLE_LINGER_SECONDS = 1.0  # How long the panel stays after a dictation finishes.
+LIVE_TRANSCRIBE_INTERVAL_SECONDS = 1.0  # How often the live transcript on the overlay refreshes.
+LIVE_TRANSCRIBE_WINDOW_SECONDS = 15.0  # The overlay only shows the tail, so a fixed window keeps latency flat on long dictations.
+OVERLAY_PANEL_WIDTH = 480
+OVERLAY_PANEL_HEIGHT = 150
+OVERLAY_BOTTOM_MARGIN = 80
 TRANSCRIPTION_LANGUAGE = "en"  # Skips language detection for faster English dictation.
 HIDE_CONSOLE_ON_START = os.environ.get("LOCAL_FLOW_DEBUG_CONSOLE") != "1"
 SHOW_METRICS = True  # Show a live "total 0.7s · whisper 0.3 · llm 0.1" line on the overlay after each dictation.
@@ -132,7 +147,10 @@ shutdown_event = threading.Event()
 current_status = "starting"
 show_idle_overlay_until = 0.0
 last_metrics_text = ""  # Populated after each dictation when SHOW_METRICS is on.
+live_partial_text = ""  # ponytail: plain str, assignment is atomic; a stale frame costs nothing.
 _dll_directory_handles = []
+_app_icon_cache: dict[str, object] = {}  # exe path -> PIL Image (or None when unavailable)
+_icon_warning_logged = False
 
 TRAY_COLORS = {
     "starting": (73, 144, 226),
@@ -467,11 +485,127 @@ def set_status(status: str) -> None:
 
     current_status = status
     if status == "idle":
-        show_idle_overlay_until = time.time() + STARTUP_READY_OVERLAY_SECONDS
+        # First idle after launch gets the long READY grace; later idles close fast.
+        linger = STARTUP_READY_OVERLAY_SECONDS if show_idle_overlay_until == 0.0 else OVERLAY_IDLE_LINGER_SECONDS
+        show_idle_overlay_until = time.time() + linger
     overlay_queue.put(status)
     if tray_icon is not None and TRAY_IMPORTS_AVAILABLE:
         tray_icon.icon = make_tray_image(status)
         tray_icon.title = f"Local Flow - {status}"
+
+
+def get_foreground_exe_path() -> Optional[str]:
+    """Return the executable path of the current foreground window, or None."""
+    if os.name != "nt":
+        return None
+
+    try:
+        import ctypes
+        import ctypes.wintypes as wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        window = user32.GetForegroundWindow()
+        if not window:
+            return None
+
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(window, ctypes.byref(pid))
+        if not pid.value:
+            return None
+
+        process = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not process:
+            return None
+
+        try:
+            buffer = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            if not kernel32.QueryFullProcessImageNameW(process, 0, buffer, ctypes.byref(size)):
+                return None
+            return buffer.value
+        finally:
+            kernel32.CloseHandle(process)
+    except Exception:
+        return None
+
+
+def get_app_icon_image(exe_path: str):
+    """Extract a 24x24 PIL image of an exe's icon. Returns None when unavailable."""
+    global _icon_warning_logged
+
+    if exe_path in _app_icon_cache:
+        return _app_icon_cache[exe_path]
+
+    image = None
+    try:
+        try:
+            import win32gui
+            import win32ui
+            from PIL import Image as PILImage
+        except ImportError:
+            if not _icon_warning_logged:
+                _icon_warning_logged = True
+                log("Target icon disabled. Install optional dependency: pip install pywin32")
+            _app_icon_cache[exe_path] = None
+            return None
+
+        large, small = win32gui.ExtractIconEx(exe_path, 0)
+        handles = list(large) + list(small)
+        if not handles:
+            _app_icon_cache[exe_path] = None
+            return None
+
+        icon_handle = handles[0]
+        screen_dc = memory_dc = bitmap = None
+        try:
+            screen_dc = win32ui.CreateDCFromHandle(win32gui.GetDC(0))
+            memory_dc = screen_dc.CreateCompatibleDC()
+            bitmap = win32ui.CreateBitmap()
+            bitmap.CreateCompatibleBitmap(screen_dc, 32, 32)
+            memory_dc.SelectObject(bitmap)
+            # DrawIcon uses the system icon size (40/48px at >100% display scaling), which crops
+            # into a 32x32 bitmap. DrawIconEx draws at an explicit size instead.
+            ctypes.windll.user32.DrawIconEx(
+                memory_dc.GetSafeHdc(), 0, 0, int(icon_handle), 32, 32, 0, None, 0x0003  # DI_NORMAL
+            )
+            raw = bitmap.GetBitmapBits(True)
+            image = PILImage.frombuffer("RGBA", (32, 32), raw, "raw", "BGRA", 0, 1)
+            if image.getchannel("A").getextrema() == (0, 0):
+                image.putalpha(255)  # Some icons render without alpha; keep them visible.
+            image = image.resize((24, 24), PILImage.LANCZOS)
+        finally:
+            for handle in handles:
+                try:
+                    win32gui.DestroyIcon(handle)
+                except Exception:
+                    pass
+            try:
+                if bitmap is not None:
+                    win32gui.DeleteObject(bitmap.GetHandle())
+                if memory_dc is not None:
+                    memory_dc.DeleteDC()
+                if screen_dc is not None:
+                    screen_dc.DeleteDC()
+            except Exception:
+                pass
+    except Exception as exc:
+        log(f"Could not read target app icon: {exc}")
+        image = None
+
+    _app_icon_cache[exe_path] = image
+    return image
+
+
+def draw_round_rect(canvas, x1, y1, x2, y2, radius, **options) -> None:
+    """Draw a rounded rectangle on a tkinter canvas."""
+    points = [
+        x1 + radius, y1, x2 - radius, y1, x2, y1, x2, y1 + radius,
+        x2, y2 - radius, x2, y2, x2 - radius, y2, x1 + radius, y2,
+        x1, y2, x1, y2 - radius, x1, y1 + radius, x1, y1,
+    ]
+    canvas.create_polygon(points, smooth=True, **options)
 
 
 def start_floating_overlay() -> None:
@@ -502,22 +636,73 @@ def start_floating_overlay() -> None:
         except tk.TclError:
             pass
 
-        width = 118
-        height = 76
+        from tkinter import font as tkfont
+
+        width = OVERLAY_PANEL_WIDTH
+        height = OVERLAY_PANEL_HEIGHT
         canvas = tk.Canvas(root, width=width, height=height, bg="#101820", highlightthickness=0)
         canvas.pack()
+
+        text_font = tkfont.Font(family="Segoe UI", size=10)
+        text_left = 76
+        text_width = width - text_left - 20
+        icon_photos: dict[str, object] = {}  # Keep PhotoImage refs alive.
+        current_icon_path: Optional[str] = None
+        next_icon_poll = 0.0
 
         def place_window() -> None:
             screen_width = root.winfo_screenwidth()
             screen_height = root.winfo_screenheight()
-            x = max(0, screen_width - width - 28)
-            y = max(0, screen_height - height - 96)
+            x = max(0, (screen_width - width) // 2)
+            y = max(0, screen_height - height - OVERLAY_BOTTOM_MARGIN)
             root.geometry(f"{width}x{height}+{x}+{y}")
 
+        def wrap_tail(text: str, max_lines: int = 3) -> str:
+            """Wrap text to the panel width and keep only the last `max_lines` lines."""
+            lines: list[str] = []
+            line = ""
+            for word in text.split():
+                candidate = f"{line} {word}".strip()
+                if line and text_font.measure(candidate) > text_width:
+                    lines.append(line)
+                    line = word
+                else:
+                    line = candidate
+            if line:
+                lines.append(line)
+            return "\n".join(lines[-max_lines:])
+
+        def refresh_target_icon() -> None:
+            """Cache a PhotoImage of the foreground app's icon (tkinter thread only)."""
+            nonlocal current_icon_path
+
+            exe_path = get_foreground_exe_path()
+            if not exe_path or exe_path == sys.executable:
+                return  # Our own overlay/settings window: keep whatever icon we had.
+
+            if exe_path == current_icon_path:
+                return
+
+            if exe_path not in icon_photos:
+                image = get_app_icon_image(exe_path)
+                photo = None
+                if image is not None:
+                    try:
+                        from PIL import ImageTk
+
+                        photo = ImageTk.PhotoImage(image)
+                    except Exception as exc:
+                        log(f"Could not build target icon image: {exc}")
+                icon_photos[exe_path] = photo
+
+            if icon_photos[exe_path] is not None:
+                current_icon_path = exe_path
+
         # Equalizer geometry and per-status motion energy (eased for smooth transitions).
-        bar_xs = (24, 33, 42, 51, 60)
-        bar_mid = 36
-        bar_max_half = 19
+        bar_center = width // 2
+        bar_xs = tuple(bar_center + offset for offset in (-18, -9, 0, 9, 18))
+        bar_mid = 112
+        bar_max_half = 16
         energy_targets = {"recording": 1.0, "processing": 0.55, "starting": 0.35, "idle": 0.16, "error": 0.1}
         energy = energy_targets["idle"]
 
@@ -554,6 +739,28 @@ def start_floating_overlay() -> None:
 
             canvas.delete("all")
             canvas.create_rectangle(0, 0, width, height, fill="#101820", outline="")
+            draw_round_rect(canvas, 1, 1, width - 1, height - 1, (height - 2) // 2, fill="#0D1117", outline="#2A3340", width=1)
+
+            photo = icon_photos.get(current_icon_path) if current_icon_path else None
+            if photo is not None:
+                canvas.create_image(44, 20, image=photo, anchor="nw")
+            else:
+                canvas.create_oval(44, 20, 68, 44, fill="#2A3340", outline="")
+
+            partial = live_partial_text
+            if partial:
+                canvas.create_text(
+                    text_left, 18, text=wrap_tail(partial), anchor="nw", justify="left",
+                    fill="#E6EDF3" if status == "recording" else "#7A8896",
+                    font=("Segoe UI", 10),
+                )
+            elif status == "recording":
+                canvas.create_text(
+                    text_left, 18, text="Listening…", anchor="nw",
+                    fill="#7A8896", font=("Segoe UI", 10, "italic"),
+                )
+
+            canvas.create_text(48, bar_mid, text=label, anchor="w", fill=color, font=("Segoe UI", 9, "bold"))
             for i, x in enumerate(bar_xs):
                 if status == "processing":
                     # Gentle pulse traveling across the bars.
@@ -567,15 +774,20 @@ def start_floating_overlay() -> None:
                         wave = live  # bars jump with real voice when louder than the idle dance
                 half = max(3.0, bar_max_half * energy * (0.35 + 0.65 * wave))
                 canvas.create_line(x, bar_mid - half, x, bar_mid + half, fill=color, width=6, capstyle=tk.ROUND)
-            canvas.create_text(88, 28, text=label, fill="#FFFFFF", font=("Segoe UI", 11, "bold"))
-            canvas.create_text(88, 48, text="Flow", fill="#AAB6C4", font=("Segoe UI", 9))
             if SHOW_METRICS and last_metrics_text and status in ("idle", "processing"):
                 canvas.create_text(
-                    width // 2, height - 7,
+                    width // 2, height - 16,
                     text=last_metrics_text, fill="#7A8896", font=("Segoe UI", 7),
                 )
 
         def poll() -> None:
+            nonlocal next_icon_poll
+
+            now = time.time()
+            if now >= next_icon_poll:
+                next_icon_poll = now + 0.5
+                refresh_target_icon()
+
             status = current_status
             while True:
                 try:
@@ -696,7 +908,7 @@ def drain_audio_queue() -> None:
 
 def start_recording() -> None:
     """Start microphone capture."""
-    global input_stream, is_recording
+    global input_stream, is_recording, live_partial_text
 
     with recording_lock:
         if is_recording:
@@ -708,6 +920,7 @@ def start_recording() -> None:
 
         recorded_chunks.clear()
         drain_audio_queue()
+        live_partial_text = ""
 
         try:
             input_stream = sd.InputStream(
@@ -729,7 +942,8 @@ def start_recording() -> None:
 
         is_recording = True
         set_status("recording")
-        log("RECORDING ON  | Speak now. Press Ctrl+Shift+K again to stop.")
+        threading.Thread(target=live_transcribe_loop, daemon=True).start()
+        log("RECORDING ON  | Speak now. Press Ctrl+Shift+J again to stop.")
 
 
 def stop_recording() -> None:
@@ -781,12 +995,12 @@ def write_temp_wav() -> Path:
     return wav_path
 
 
-def transcribe_audio(wav_path: Path) -> str:
-    """Transcribe the WAV file with faster-whisper."""
+def transcribe_audio(source, quiet: bool = False) -> str:
+    """Transcribe a WAV path or a float32 numpy array with faster-whisper."""
     model = load_whisper_model()
     try:
         segments, info = model.transcribe(
-            str(wav_path),
+            str(source) if isinstance(source, Path) else source,
             language=TRANSCRIPTION_LANGUAGE,
             beam_size=1,
             best_of=1,
@@ -810,11 +1024,39 @@ def transcribe_audio(wav_path: Path) -> str:
             log("Temporary fallback: set WHISPER_DEVICE = 'cpu' and WHISPER_COMPUTE_TYPE = 'int8'.")
         raise
 
-    log(
-        "Transcription complete "
-        f"(language={info.language}, probability={info.language_probability:.2f})."
-    )
+    if not quiet:
+        log(
+            "Transcription complete "
+            f"(language={info.language}, probability={info.language_probability:.2f})."
+        )
     return text
+
+
+def live_transcribe_loop() -> None:
+    """Re-transcribe the audio captured so far while recording, for the overlay."""
+    global live_partial_text
+
+    while is_recording and not shutdown_event.is_set():
+        time.sleep(LIVE_TRANSCRIBE_INTERVAL_SECONDS)
+        if not is_recording or shutdown_event.is_set():
+            return
+
+        try:
+            # Snapshot without dequeuing: stop_recording() still owns the real drain.
+            chunks = list(recorded_chunks) + list(audio_queue.queue)
+            if not chunks:
+                continue
+
+            audio = np.concatenate(chunks, axis=0).reshape(-1).astype(np.float32)
+            audio = audio[-int(SAMPLE_RATE * LIVE_TRANSCRIBE_WINDOW_SECONDS):]
+            if len(audio) < SAMPLE_RATE * 0.5:
+                continue
+
+            text = transcribe_audio(audio, quiet=True)
+            if is_recording and text:
+                live_partial_text = text
+        except Exception as exc:
+            log(f"Live transcription skipped: {exc}")
 
 
 def refine_with_ollama(raw_text: str) -> str:
@@ -930,7 +1172,7 @@ def paste_text(text: str) -> None:
 
 def process_recording() -> None:
     """Save, transcribe, polish, and paste the captured recording."""
-    global is_processing, last_metrics_text
+    global is_processing, last_metrics_text, live_partial_text
 
     wav_path: Optional[Path] = None
     status_after_processing = "idle"
@@ -978,6 +1220,7 @@ def process_recording() -> None:
                 log(f"Could not delete temporary WAV: {wav_path}")
         with recording_lock:
             is_processing = False
+        live_partial_text = ""
         if not shutdown_event.is_set():
             set_status(status_after_processing)
 

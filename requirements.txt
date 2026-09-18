@@ -8,3 +8,5 @@ numpy==2.4.6
 # Optional: system tray icon
 pystray==0.19.5
 pillow==12.2.0
+# Optional: target-app icon in overlay
+pywin32==311
