@@ -13,6 +13,9 @@ Optional tray icon:
 Optional target-app icon in the overlay:
     pip install pywin32
 
+Optional Parakeet STT engine (STT_ENGINE = "parakeet", the default):
+    pip install onnx-asr[gpu,hub] onnxruntime-gpu==1.22.0 nvidia-cuda-runtime-cu12 nvidia-cufft-cu12
+
 Overlay:
     A dark rounded panel at the bottom center of the screen showing the target
     app icon, the live (partial) transcript while you speak, and the animated
@@ -22,6 +25,8 @@ Notes:
     - Ollama must already be running at OLLAMA_URL.
     - The selected Ollama model must already be pulled locally.
     - faster-whisper with device="cuda" requires a working NVIDIA CUDA runtime.
+    - Parakeet (onnx-asr) needs the nvidia CUDA runtime wheels on PATH; see
+      configure_cuda_dll_search().
 """
 
 from __future__ import annotations
@@ -78,6 +83,12 @@ OLLAMA_KEEP_ALIVE = "30m"
 ENABLE_OLLAMA_REFINEMENT = True
 OLLAMA_NUM_PREDICT = 96
 
+# Speech-to-text engine:
+#   "parakeet" -> NVIDIA Parakeet via onnx-asr. Fast, punctuated output, needs the GPU wheels.
+#   "whisper"  -> faster-whisper fallback, works on CPU.
+STT_ENGINE = "parakeet"
+PARAKEET_MODEL_NAME = "nemo-parakeet-tdt-0.6b-v3"
+
 # Whisper model. Smaller = faster, less accurate. Good options:
 #   "base.en" / "small.en"  -> best for CPU (low latency), the fallback if no GPU
 #   "large-v3-turbo"        -> best accuracy, needs a GPU to stay fast
@@ -92,10 +103,12 @@ WHISPER_COMPUTE_TYPE = "float16"  # CPU users: set WHISPER_DEVICE="cpu" and this
 # Leave empty on CPU. On Windows GPU setups, add the folder(s) containing
 # cublas64_12.dll / cudnn*.dll if they are not already on your PATH, e.g.:
 #   EXTRA_CUDA_DLL_DIRS = [r"C:\path\to\cuda\bin"]
-EXTRA_CUDA_DLL_DIRS: list[str] = [
-    str(Path(__file__).resolve().parent / ".venv" / "Lib" / "site-packages" / "nvidia" / "cublas" / "bin"),
-    str(Path(__file__).resolve().parent / ".venv" / "Lib" / "site-packages" / "nvidia" / "cudnn" / "bin"),
-]
+# All nvidia wheel bin dirs in the venv: onnxruntime's CUDA provider needs cuda_runtime
+# and cufft on top of the cublas/cudnn that faster-whisper wants.
+EXTRA_CUDA_DLL_DIRS: list[str] = sorted(
+    str(p)
+    for p in (Path(__file__).resolve().parent / ".venv" / "Lib" / "site-packages" / "nvidia").glob("*/bin")
+)
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -105,7 +118,7 @@ ENABLE_FLOATING_OVERLAY = True
 FLOATING_OVERLAY_SHOW_WHEN_IDLE = False
 STARTUP_READY_OVERLAY_SECONDS = 4
 OVERLAY_IDLE_LINGER_SECONDS = 1.0  # How long the panel stays after a dictation finishes.
-LIVE_TRANSCRIBE_INTERVAL_SECONDS = 1.0  # How often the live transcript on the overlay refreshes.
+LIVE_TRANSCRIBE_INTERVAL_SECONDS = 0.25 if STT_ENGINE == "parakeet" else 1.0  # How often the live transcript on the overlay refreshes.
 LIVE_TRANSCRIBE_WINDOW_SECONDS = 15.0  # The overlay only shows the tail, so a fixed window keeps latency flat on long dictations.
 OVERLAY_PANEL_WIDTH = 480
 OVERLAY_PANEL_HEIGHT = 150
@@ -144,6 +157,8 @@ is_processing = False
 input_stream: Optional[sd.InputStream] = None
 recorded_chunks: list[np.ndarray] = []
 whisper_model: Optional["FasterWhisperModel"] = None
+parakeet_model = None
+model_load_lock = threading.Lock()
 listener: Optional[keyboard.Listener] = None
 hotkey: Optional[keyboard.HotKey] = None
 tray_icon = None
@@ -432,7 +447,8 @@ def open_settings_window(icon=None, item=None) -> None:
 
 def configure_cuda_dll_search() -> None:
     """Expose known CUDA runtime folders to this Python process."""
-    if WHISPER_DEVICE.lower() != "cuda":
+    # Parakeet always wants the DLLs on PATH; whisper only when it runs on GPU.
+    if STT_ENGINE == "whisper" and WHISPER_DEVICE.lower() != "cuda":
         return
 
     for raw_dir in EXTRA_CUDA_DLL_DIRS:
@@ -860,6 +876,44 @@ def start_tray_icon() -> None:
     threading.Thread(target=animate_tray, daemon=True).start()
 
 
+def load_parakeet_model():
+    """Load the Parakeet ONNX model once so hotkey dictation stays snappy."""
+    global parakeet_model
+
+    with model_load_lock:
+        if parakeet_model is not None:
+            return parakeet_model
+
+        configure_cuda_dll_search()
+        try:
+            import onnx_asr
+        except ImportError as exc:
+            set_status("error")
+            log("Could not import onnx_asr.")
+            log("Install it with: pip install onnx-asr[gpu,hub]")
+            raise RuntimeError(f"Parakeet initialization failed: {exc}") from exc
+
+        log(f"Loading Parakeet '{PARAKEET_MODEL_NAME}' (CUDA)...")
+        started = time.perf_counter()
+        try:
+            parakeet_model = onnx_asr.load_model(
+                PARAKEET_MODEL_NAME,
+                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            )
+        except Exception as exc:
+            set_status("error")
+            log("Could not initialize Parakeet.")
+            log("Debug hints:")
+            log("- pip install onnx-asr[gpu,hub] onnxruntime-gpu==1.22.0")
+            log("- pip install nvidia-cuda-runtime-cu12 nvidia-cufft-cu12")
+            log("- Fallback: set STT_ENGINE = 'whisper'.")
+            raise RuntimeError(f"Parakeet initialization failed: {exc}") from exc
+
+        log(f"Parakeet model loaded ({time.perf_counter() - started:.2f}s).")
+        set_status("idle")
+        return parakeet_model
+
+
 def load_whisper_model() -> "FasterWhisperModel":
     """Load faster-whisper once so hotkey dictation stays snappy."""
     global whisper_model
@@ -1000,7 +1054,22 @@ def write_temp_wav() -> Path:
 
 
 def transcribe_audio(source, quiet: bool = False) -> str:
-    """Transcribe a WAV path or a float32 numpy array with faster-whisper."""
+    """Transcribe a WAV path or a float32 numpy array with the configured STT engine."""
+    if STT_ENGINE == "parakeet":
+        model = load_parakeet_model()
+        try:
+            if isinstance(source, Path):
+                audio, sample_rate = sf.read(str(source), dtype="float32")
+            else:
+                audio, sample_rate = source, SAMPLE_RATE
+            text = str(model.recognize(audio, sample_rate=sample_rate)).strip()
+        except Exception as exc:
+            log(f"Parakeet transcription failed: {exc}")
+            raise
+        if not quiet:
+            log("Transcription complete (parakeet).")
+        return text  # ponytail: parakeet already punctuates and capitalizes.
+
     model = load_whisper_model()
     try:
         segments, info = model.transcribe(
@@ -1256,7 +1325,10 @@ def print_startup_banner() -> None:
     log(f"Hotkey: {HOTKEY}")
     log(f"Ollama model: {OLLAMA_MODEL}")
     log(f"Ollama URL: {OLLAMA_URL}")
-    log(f"Whisper: {WHISPER_MODEL_NAME} on {WHISPER_DEVICE} ({WHISPER_COMPUTE_TYPE})")
+    if STT_ENGINE == "parakeet":
+        log(f"STT engine: parakeet ({PARAKEET_MODEL_NAME}, CUDA)")
+    else:
+        log(f"STT engine: whisper ({WHISPER_MODEL_NAME} on {WHISPER_DEVICE}, {WHISPER_COMPUTE_TYPE})")
     log(f"Transcription language: {TRANSCRIPTION_LANGUAGE}")
     log(f"Ollama refinement: {'on' if ENABLE_OLLAMA_REFINEMENT else 'off'}")
     log(f"Tray icon: {'on' if ENABLE_TRAY_ICON else 'off'}")
@@ -1271,7 +1343,13 @@ if __name__ == "__main__":
     start_tray_icon()
 
     try:
-        load_whisper_model()
+        if STT_ENGINE == "parakeet":
+            model = load_parakeet_model()
+            started = time.perf_counter()
+            model.recognize(np.zeros(SAMPLE_RATE, dtype=np.float32), sample_rate=SAMPLE_RATE)
+            log(f"Parakeet warm-up ({time.perf_counter() - started:.2f}s).")
+        else:
+            load_whisper_model()
     except Exception as exc:
         log(f"Startup failed: {exc}")
         sys.exit(1)

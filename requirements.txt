@@ -8,6 +8,11 @@ numpy==2.4.6
 # Optional: GPU transcription (WHISPER_DEVICE = "cuda")
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
+# Optional: Parakeet STT engine (STT_ENGINE = "parakeet")
+onnx-asr[gpu,hub]
+onnxruntime-gpu==1.22.0
+nvidia-cuda-runtime-cu12
+nvidia-cufft-cu12
 # Optional: system tray icon
 pystray==0.19.5
 pillow==12.2.0
