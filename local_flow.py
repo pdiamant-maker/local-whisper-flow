@@ -79,20 +79,23 @@ ENABLE_OLLAMA_REFINEMENT = True
 OLLAMA_NUM_PREDICT = 96
 
 # Whisper model. Smaller = faster, less accurate. Good options:
-#   "base.en" / "small.en"  -> best for CPU (low latency)
+#   "base.en" / "small.en"  -> best for CPU (low latency), the fallback if no GPU
 #   "large-v3-turbo"        -> best accuracy, needs a GPU to stay fast
-WHISPER_MODEL_NAME = "base.en"
+WHISPER_MODEL_NAME = "large-v3-turbo"
 
-# Device: "cpu" works everywhere. Switch to "cuda" if you have an NVIDIA GPU
-# with the CUDA runtime installed (see the GPU section of the README).
-WHISPER_DEVICE = "cpu"
-WHISPER_COMPUTE_TYPE = "int8"  # GPU users: set WHISPER_DEVICE="cuda" and this to "float16".
+# Device: "cpu" works everywhere (fallback: WHISPER_MODEL_NAME="base.en", WHISPER_COMPUTE_TYPE="int8").
+# "cuda" requires an NVIDIA GPU with the CUDA runtime installed (see the GPU section of the README).
+WHISPER_DEVICE = "cuda"
+WHISPER_COMPUTE_TYPE = "float16"  # CPU users: set WHISPER_DEVICE="cpu" and this to "int8".
 
 # ADVANCED / GPU ONLY: extra folders to search for CUDA runtime DLLs (cuBLAS/cuDNN).
 # Leave empty on CPU. On Windows GPU setups, add the folder(s) containing
 # cublas64_12.dll / cudnn*.dll if they are not already on your PATH, e.g.:
 #   EXTRA_CUDA_DLL_DIRS = [r"C:\path\to\cuda\bin"]
-EXTRA_CUDA_DLL_DIRS: list[str] = []
+EXTRA_CUDA_DLL_DIRS: list[str] = [
+    str(Path(__file__).resolve().parent / ".venv" / "Lib" / "site-packages" / "nvidia" / "cublas" / "bin"),
+    str(Path(__file__).resolve().parent / ".venv" / "Lib" / "site-packages" / "nvidia" / "cudnn" / "bin"),
+]
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -121,8 +124,9 @@ SYSTEM_PROMPT = """You clean raw speech-to-text dictation.
 
 Rules:
 - Remove filler words, false starts, repeated stutters, and verbal hesitation.
-- Preserve the speaker's meaning.
 - Add correct punctuation, capitalization, and paragraph breaks when useful.
+- Keep every remaining word exactly as the speaker said it. Never substitute, reorder, or add words.
+- Do not fix grammar or word choice. Awkward phrasing stays as spoken.
 - Keep technical terms, names, numbers, and code-like text intact.
 - Output ONLY the clean final statement.
 - Do not add commentary, explanations, quotes, markdown, prefixes, or suffixes."""

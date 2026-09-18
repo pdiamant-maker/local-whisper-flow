@@ -5,6 +5,9 @@ pynput==1.8.2
 pyperclip==1.11.0
 pyautogui==0.9.54
 numpy==2.4.6
+# Optional: GPU transcription (WHISPER_DEVICE = "cuda")
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
 # Optional: system tray icon
 pystray==0.19.5
 pillow==12.2.0
