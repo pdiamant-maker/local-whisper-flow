@@ -1595,6 +1595,45 @@ class UiApi:
             return {"error": str(exc)}
 
 
+_window_icon_set = False
+
+
+def set_main_window_icon() -> None:
+    """Replace the inherited pythonw.exe title-bar icon with local_flow.ico.
+
+    The native handle only exists after the first show, so this runs from
+    open_main_window, slightly delayed.
+    """
+    global _window_icon_set
+    if _window_icon_set:
+        return
+    try:
+        import win32con
+        import win32gui
+
+        icon_path = APP_DIR / "local_flow.ico"
+        # The hidden tk overlay root is also titled "Local Flow";
+        # match the WinForms class to get the webview window.
+        hwnds = []
+
+        def collect(h, _):
+            if win32gui.GetWindowText(h) == "Local Flow" and win32gui.GetClassName(h).startswith("WindowsForms"):
+                hwnds.append(h)
+
+        win32gui.EnumWindows(collect, None)
+        if not hwnds or not icon_path.exists():
+            return
+        for size, kind in ((16, win32con.ICON_SMALL), (32, win32con.ICON_BIG)):
+            hicon = win32gui.LoadImage(
+                0, str(icon_path), win32con.IMAGE_ICON,
+                size, size, win32con.LR_LOADFROMFILE,
+            )
+            win32gui.SendMessage(hwnds[0], win32con.WM_SETICON, kind, hicon)
+        _window_icon_set = True
+    except Exception as exc:
+        log(f"Could not set window icon: {exc}")
+
+
 def open_main_window() -> None:
     """Show the main window created on the main thread at startup."""
     if webview_window is None:
@@ -1603,6 +1642,7 @@ def open_main_window() -> None:
     try:
         webview_window.show()
         webview_window.restore()
+        threading.Timer(0.5, set_main_window_icon).start()
     except Exception as exc:
         log(f"Could not show the main window: {exc}")
 
