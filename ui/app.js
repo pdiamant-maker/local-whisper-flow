@@ -666,60 +666,69 @@
   }
 
   // ---- Settings ----
-  var KEY_NAME_MAP = {
-    " ": "<space>", "Escape": "<esc>", "Tab": "<tab>", "Enter": "<enter>",
-    "Backspace": "<backspace>", "Delete": "<delete>", "ArrowUp": "<up>",
-    "ArrowDown": "<down>", "ArrowLeft": "<left>", "ArrowRight": "<right>",
-    "Home": "<home>", "End": "<end>", "PageUp": "<page_up>", "PageDown": "<page_down>",
-    "F1": "<f1>", "F2": "<f2>", "F3": "<f3>", "F4": "<f4>", "F5": "<f5>", "F6": "<f6>",
-    "F7": "<f7>", "F8": "<f8>", "F9": "<f9>", "F10": "<f10>", "F11": "<f11>", "F12": "<f12>"
-  };
-
-  function keyToToken(e) {
-    if (e.key.length === 1) return e.key.toLowerCase();
-    return KEY_NAME_MAP[e.key] || null;
-  }
 
   function formatHotkeyDisplay(combo) {
     if (!combo) return "Not set";
     return combo.replace(/<ctrl>/g, "Ctrl").replace(/<shift>/g, "Shift")
-      .replace(/<alt>/g, "Alt").replace(/<cmd>/g, "Win").replace(/</g, "").replace(/>/g, "")
+      .replace(/<alt_gr>/g, "AltGr").replace(/<alt>/g, "Alt").replace(/<cmd>/g, "Win")
+      .replace(/</g, "").replace(/>/g, "")
       .split("+").join(" + ");
   }
 
+  // Capture runs in Python via pynput (see UiApi.start_hotkey_capture in
+  // local_flow.py): pynput sees keys exactly like the real global hotkey
+  // listener does (correct physical layout, AltGr, Win key), where browser
+  // keydown events map through a US layout and WebView2 reserves some chords
+  // (e.g. Ctrl+Shift+J) as devtools accelerators. This just polls for the result.
+  var hotkeyCapturePolling = null;
+
+  function stopHotkeyCapturePolling() {
+    if (hotkeyCapturePolling) {
+      clearInterval(hotkeyCapturePolling);
+      hotkeyCapturePolling = null;
+    }
+  }
+
   function startHotkeyCapture(button, onCapture) {
+    var a = api();
+    if (!a || typeof a.start_hotkey_capture !== "function") return;
+
     button.classList.add("capturing");
     button.textContent = "Press keys... (Esc to cancel)";
 
-    function handler(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.key === "Escape") {
-        cleanup();
-        onCapture(null);
-        return;
-      }
-      if (["Control", "Shift", "Alt", "Meta"].indexOf(e.key) !== -1) return;
-
-      var token = keyToToken(e);
-      if (!token) return;
-
-      var parts = [];
-      if (e.ctrlKey) parts.push("<ctrl>");
-      if (e.shiftKey) parts.push("<shift>");
-      if (e.altKey) parts.push("<alt>");
-      if (e.metaKey) parts.push("<cmd>");
-      parts.push(token);
-      cleanup();
-      onCapture(parts.join("+"));
-    }
-
     function cleanup() {
-      document.removeEventListener("keydown", handler, true);
+      stopHotkeyCapturePolling();
       button.classList.remove("capturing");
     }
 
-    document.addEventListener("keydown", handler, true);
+    function escHandler(e) {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      document.removeEventListener("keydown", escHandler, true);
+      if (a.cancel_hotkey_capture) a.cancel_hotkey_capture();
+      cleanup();
+      onCapture(null);
+    }
+    document.addEventListener("keydown", escHandler, true);
+
+    a.start_hotkey_capture().then(function () {
+      hotkeyCapturePolling = setInterval(function () {
+        a.get_hotkey_capture().then(function (data) {
+          if (!data || data.state === "recording") {
+            if (data && data.display) button.textContent = data.display + " ...";
+            return;
+          }
+          document.removeEventListener("keydown", escHandler, true);
+          cleanup();
+          onCapture(data.state === "done" ? data.hotkey : null);
+        }).catch(function () {
+          document.removeEventListener("keydown", escHandler, true);
+          cleanup();
+          onCapture(null);
+        });
+      }, 150);
+    });
   }
 
   function setSetting(key, value) {
@@ -930,6 +939,23 @@
     document.getElementById("export-support-btn").addEventListener("click", function () {
       var a = api();
       if (a && typeof a.export_support_bundle === "function") a.export_support_bundle();
+    });
+    document.getElementById("open-app-folder-btn").addEventListener("click", function () {
+      var a = api();
+      if (a && typeof a.open_app_folder === "function") a.open_app_folder();
+    });
+
+    document.getElementById("create-shortcut-btn").addEventListener("click", function () {
+      var a = api();
+      if (!a || typeof a.create_desktop_launcher !== "function") return;
+      var note = document.getElementById("desktop-shortcut-note");
+      a.create_desktop_launcher().then(function (result) {
+        note.hidden = false;
+        note.textContent = result && result.ok ? "Shortcut created." : "Failed to create shortcut.";
+      }).catch(function () {
+        note.hidden = false;
+        note.textContent = "Failed to create shortcut.";
+      });
     });
 
     document.getElementById("restart-now-btn").addEventListener("click", function () {

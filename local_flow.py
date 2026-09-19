@@ -437,9 +437,12 @@ def create_windows_shortcut(shortcut_path: Path, *, startup: bool = False) -> No
     """Create a Windows .lnk shortcut to this script."""
     shortcut_path.parent.mkdir(parents=True, exist_ok=True)
     target_path = get_windowless_python()
-    arguments = f'"{SCRIPT_PATH}"'
+    launcher_path = APP_DIR / "local_flow_launcher.pyw"
+    launch_script = launcher_path if launcher_path.exists() else SCRIPT_PATH
+    arguments = f'"{launch_script}"'
     description = f"{APP_NAME} local dictation"
-    icon_location = f"{target_path},0"
+    icon_path = APP_DIR / "local_flow.ico"
+    icon_location = f"{icon_path},0" if icon_path.exists() else f"{target_path},0"
     window_style = 7 if startup else 1
 
     script = f"""
@@ -490,111 +493,6 @@ def open_path(path: Path) -> None:
         os.startfile(str(path))
     except OSError as exc:
         log(f"Could not open {path}: {exc}")
-
-
-def open_settings_window(icon=None, item=None) -> None:
-    """Open a small settings window for shortcuts and startup behavior."""
-
-    def run_window() -> None:
-        try:
-            import tkinter as tk
-            from tkinter import messagebox
-        except ImportError:
-            log("Settings window unavailable because Tkinter is not installed.")
-            return
-
-        root = tk.Tk()
-        root.title(f"{APP_NAME} Settings")
-        root.resizable(False, False)
-        root.attributes("-topmost", True)
-
-        status_var = tk.StringVar()
-
-        def refresh_status() -> None:
-            desktop_status = "installed" if get_desktop_shortcut_path().exists() else "not installed"
-            startup_status = "enabled" if get_startup_shortcut_path().exists() else "disabled"
-            status_var.set(
-                f"Desktop launcher: {desktop_status}\n"
-                f"Start with Windows: {startup_status}\n"
-                f"Script: {SCRIPT_PATH}\n"
-                f"Log: {LOG_FILE}"
-            )
-
-        def run_action(label: str, action) -> None:
-            try:
-                result = action()
-                refresh_status()
-                if result:
-                    messagebox.showinfo(APP_NAME, f"{label} complete:\n{result}")
-                else:
-                    messagebox.showinfo(APP_NAME, f"{label} complete.")
-            except Exception as exc:
-                log(f"{label} failed: {exc}")
-                messagebox.showerror(APP_NAME, f"{label} failed:\n{exc}")
-
-        frame = tk.Frame(root, padx=18, pady=16)
-        frame.pack(fill="both", expand=True)
-
-        tk.Label(frame, text=APP_NAME, font=("Segoe UI", 15, "bold")).pack(anchor="w")
-        tk.Label(
-            frame,
-            text="Local dictation helper",
-            font=("Segoe UI", 9),
-            fg="#555555",
-        ).pack(anchor="w", pady=(0, 12))
-
-        tk.Label(
-            frame,
-            textvariable=status_var,
-            justify="left",
-            anchor="w",
-            width=72,
-            bg="#F3F5F7",
-            padx=10,
-            pady=8,
-        ).pack(fill="x", pady=(0, 12))
-
-        tk.Button(
-            frame,
-            text="Create Desktop Launcher",
-            command=lambda: run_action("Create desktop launcher", create_desktop_shortcut),
-            width=30,
-        ).pack(anchor="w", pady=3)
-
-        tk.Button(
-            frame,
-            text="Start Local Flow When Windows Starts",
-            command=lambda: run_action("Enable startup", enable_start_with_windows),
-            width=30,
-        ).pack(anchor="w", pady=3)
-
-        tk.Button(
-            frame,
-            text="Stop Starting With Windows",
-            command=lambda: run_action("Disable startup", disable_start_with_windows),
-            width=30,
-        ).pack(anchor="w", pady=3)
-
-        tk.Button(
-            frame,
-            text="Open App Folder",
-            command=lambda: open_path(APP_DIR),
-            width=30,
-        ).pack(anchor="w", pady=(12, 3))
-
-        tk.Button(
-            frame,
-            text="Open Log File",
-            command=lambda: open_path(LOG_FILE),
-            width=30,
-        ).pack(anchor="w", pady=3)
-
-        tk.Button(frame, text="Close", command=root.destroy, width=30).pack(anchor="w", pady=(12, 0))
-
-        refresh_status()
-        root.mainloop()
-
-    threading.Thread(target=run_window, daemon=True).start()
 
 
 def configure_cuda_dll_search() -> None:
@@ -1529,6 +1427,40 @@ class UiApi:
         snapshot["restart_required"] = any(key in RESTART_REQUIRED_KEYS for key in updates)
         return snapshot
 
+    def start_hotkey_capture(self) -> dict:
+        global hotkey_capture_active, _hotkey_capture_state, _hotkey_capture_result
+        global _hotkey_capture_live, _hotkey_capture_listener, _hotkey_capture_timer, _hotkey_capture_done
+
+        if _hotkey_capture_listener is not None:
+            self.cancel_hotkey_capture()
+
+        _hotkey_capture_down.clear()
+        _hotkey_capture_seen.clear()
+        _hotkey_capture_done = False
+        with _hotkey_capture_lock:
+            _hotkey_capture_state = "recording"
+            _hotkey_capture_result = None
+            _hotkey_capture_live = []
+        hotkey_capture_active = True
+
+        _hotkey_capture_listener = keyboard.Listener(on_press=_capture_on_press, on_release=_capture_on_release)
+        _hotkey_capture_timer = threading.Timer(15.0, lambda: _capture_finish(None, "cancelled"))
+        _hotkey_capture_timer.daemon = True
+        _hotkey_capture_listener.start()
+        _hotkey_capture_timer.start()
+        return self.get_hotkey_capture()
+
+    def get_hotkey_capture(self) -> dict:
+        with _hotkey_capture_lock:
+            state = _hotkey_capture_state
+            combo = _hotkey_capture_result
+            live = list(_hotkey_capture_live)
+        display = _format_hotkey_display(combo) if combo else (_format_hotkey_display(_finalize_combo(live)) if live else None)
+        return {"state": state, "hotkey": combo, "display": display}
+
+    def cancel_hotkey_capture(self) -> None:
+        _capture_finish(None, "cancelled")
+
     def get_launch_at_login(self) -> bool:
         return get_startup_shortcut_path().exists()
 
@@ -1571,6 +1503,17 @@ class UiApi:
 
     def open_logs(self) -> None:
         open_path(LOG_FILE)
+
+    def open_app_folder(self) -> None:
+        open_path(APP_DIR)
+
+    def create_desktop_launcher(self) -> dict:
+        try:
+            path = create_desktop_shortcut()
+            return {"ok": True, "path": str(path)}
+        except Exception as exc:
+            log(f"create_desktop_launcher failed: {exc}")
+            return {"ok": False, "error": str(exc)}
 
     def export_support_bundle(self) -> bool:
         try:
@@ -1678,7 +1621,6 @@ def start_tray_icon() -> None:
     menu = pystray.Menu(
         pystray.MenuItem("Open Local Flow", lambda icon, item: open_main_window()),
         pystray.MenuItem("Toggle recording", lambda icon, item: toggle_recording()),
-        pystray.MenuItem("Settings...", open_settings_window),
         pystray.MenuItem("Quit Local Flow", quit_app),
     )
     tray_icon = pystray.Icon("Local Flow", make_tray_image(current_status), "Local Flow", menu)
@@ -2190,10 +2132,158 @@ class HoldHotkey:
             self._on_stop()
 
 
+# -----------------------------
+# Interactive hotkey capture (pynput)
+# -----------------------------
+# The settings UI records a new hotkey by starting a dedicated, short-lived
+# pynput Listener here rather than reading browser keydown events: pynput sees
+# keys exactly like the real global listener does (correct physical layout,
+# AltGr, Win key), where the browser maps e.code through a US layout and
+# WebView2 reserves some chords (e.g. Ctrl+Shift+J) as devtools accelerators.
+
+hotkey_capture_active = False  # guard: on_press/on_release below skip dispatch while a capture is running
+_hotkey_capture_lock = threading.Lock()
+_hotkey_capture_state = "idle"  # idle | recording | done | cancelled
+_hotkey_capture_result: Optional[str] = None
+_hotkey_capture_live: list = []  # tokens held right now, for live UI feedback
+_hotkey_capture_listener: Optional[keyboard.Listener] = None
+_hotkey_capture_timer: Optional[threading.Timer] = None
+_hotkey_capture_done = True  # True whenever no capture is in flight (blocks stray finishes)
+_hotkey_capture_down: dict = {}  # raw pynput key -> token, keys currently held
+_hotkey_capture_seen: dict = {}  # token -> True, every modifier token seen this capture, in order
+
+_CAPTURE_MODIFIER_TOKENS = {"<ctrl>", "<alt>", "<alt_gr>", "<shift>", "<cmd>"}
+_CAPTURE_MODIFIER_ORDER = ["<ctrl>", "<alt>", "<alt_gr>", "<shift>", "<cmd>"]
+
+_CAPTURE_KEY_TOKENS = {
+    keyboard.Key.ctrl_l: "<ctrl>", keyboard.Key.ctrl_r: "<ctrl>", keyboard.Key.ctrl: "<ctrl>",
+    keyboard.Key.shift_l: "<shift>", keyboard.Key.shift_r: "<shift>", keyboard.Key.shift: "<shift>",
+    keyboard.Key.alt_l: "<alt>", keyboard.Key.alt: "<alt>",
+    # Windows reports AltGr as alt_gr, and sometimes as alt_r alongside a
+    # synthetic ctrl_l (see the quirk handling in _capture_on_press) — both
+    # mean the same physical AltGr key, so both map to <alt_gr>.
+    keyboard.Key.alt_gr: "<alt_gr>", keyboard.Key.alt_r: "<alt_gr>",
+    keyboard.Key.cmd: "<cmd>", keyboard.Key.cmd_l: "<cmd>", keyboard.Key.cmd_r: "<cmd>",
+    keyboard.Key.space: "<space>", keyboard.Key.tab: "<tab>", keyboard.Key.enter: "<enter>",
+    keyboard.Key.backspace: "<backspace>", keyboard.Key.delete: "<delete>",
+    keyboard.Key.up: "<up>", keyboard.Key.down: "<down>", keyboard.Key.left: "<left>", keyboard.Key.right: "<right>",
+    keyboard.Key.home: "<home>", keyboard.Key.end: "<end>",
+    keyboard.Key.page_up: "<page_up>", keyboard.Key.page_down: "<page_down>",
+}
+
+
+def _capture_token(key) -> Optional[str]:
+    """Map one pynput key event to the token string keyboard.HotKey.parse() accepts."""
+    if key in _CAPTURE_KEY_TOKENS:
+        return _CAPTURE_KEY_TOKENS[key]
+    if isinstance(key, keyboard.Key):
+        return f"<{key.name}>"  # other Key enum members (Fn keys, etc.), e.g. Key.f5 -> "<f5>"
+    vk = getattr(key, "vk", None)
+    char = getattr(key, "char", None)
+    if char and char.isprintable():
+        return char.lower()
+    # Ctrl+letter/digit produces a control character in .char (e.g. "\x0a" for
+    # Ctrl+J) on Windows; pynput still exposes the real key via .vk.
+    if vk is not None:
+        if 65 <= vk <= 90:
+            return chr(vk).lower()
+        if 48 <= vk <= 57:
+            return chr(vk)
+    return None
+
+
+def _finalize_combo(modifier_tokens, final_token: Optional[str] = None) -> Optional[str]:
+    """Build a HotKey.parse()-compatible combo string from modifier tokens (any
+    order, duplicates allowed) plus an optional trailing non-modifier key token."""
+    mods = [t for t in _CAPTURE_MODIFIER_ORDER if t in modifier_tokens]
+    if final_token:
+        mods.append(final_token)
+    return "+".join(mods) if mods else None
+
+
+def _capture_valid(combo: Optional[str]) -> bool:
+    if not combo:
+        return False
+    try:
+        keyboard.HotKey.parse(combo)
+        return True
+    except Exception:
+        return False
+
+
+def _format_hotkey_display(combo: Optional[str]) -> Optional[str]:
+    """Mirrors ui/app.js's formatHotkeyDisplay() so both sides agree on the label."""
+    if not combo:
+        return None
+    display = combo
+    for token, name in (("<ctrl>", "Ctrl"), ("<shift>", "Shift"), ("<alt_gr>", "AltGr"), ("<alt>", "Alt"), ("<cmd>", "Win")):
+        display = display.replace(token, name)
+    display = display.replace("<", "").replace(">", "")
+    return " + ".join(display.split("+"))
+
+
+def _capture_finish(combo: Optional[str], state: str) -> None:
+    global _hotkey_capture_done, hotkey_capture_active
+    if _hotkey_capture_done:
+        return
+    _hotkey_capture_done = True
+    hotkey_capture_active = False
+    if _hotkey_capture_timer is not None:
+        _hotkey_capture_timer.cancel()
+    if _hotkey_capture_listener is not None:
+        try:
+            _hotkey_capture_listener.stop()
+        except Exception:
+            pass
+    with _hotkey_capture_lock:
+        globals()["_hotkey_capture_state"] = state
+        globals()["_hotkey_capture_result"] = combo
+        globals()["_hotkey_capture_live"] = []
+
+
+def _capture_on_press(key) -> None:
+    if key == keyboard.Key.esc:
+        _capture_finish(None, "cancelled")
+        return
+    if key in (keyboard.Key.alt_gr, keyboard.Key.alt_r):
+        # Windows AltGr quirk: strip the synthetic ctrl_l that rides along with it.
+        _hotkey_capture_down.pop(keyboard.Key.ctrl_l, None)
+        _hotkey_capture_seen.pop("<ctrl>", None)
+    token = _capture_token(key)
+    if token is None:
+        return
+    _hotkey_capture_down[key] = token
+    _hotkey_capture_seen[token] = True
+    with _hotkey_capture_lock:
+        globals()["_hotkey_capture_live"] = list(_hotkey_capture_seen.keys())
+    if token in _CAPTURE_MODIFIER_TOKENS:
+        return  # pending modifier only; wait for a real key or full release
+    mods = [t for t in _hotkey_capture_down.values() if t in _CAPTURE_MODIFIER_TOKENS]
+    combo = _finalize_combo(mods, token)
+    if _capture_valid(combo):
+        _capture_finish(combo, "done")
+
+
+def _capture_on_release(key) -> None:
+    _hotkey_capture_down.pop(key, None)
+    if _hotkey_capture_down or _hotkey_capture_done:
+        return
+    # Every key is now up and nothing finalized yet, so only modifier(s) were
+    # pressed (e.g. AltGr alone, or Win alone) — accept them as the combo.
+    combo = _finalize_combo(list(_hotkey_capture_seen.keys()))
+    if _capture_valid(combo):
+        _capture_finish(combo, "done")
+    else:
+        _capture_finish(None, "cancelled")
+
+
 def on_press(key) -> None:
     try:
         canonical = listener.canonical(key)
     except Exception:
+        return
+
+    if hotkey_capture_active:
         return
 
     try:
@@ -2215,6 +2305,9 @@ def on_release(key) -> None:
     try:
         canonical = listener.canonical(key)
     except Exception:
+        return
+
+    if hotkey_capture_active:
         return
 
     try:
