@@ -112,6 +112,7 @@ GAME_MODE_IGNORE_EXES = {  # full-screen apps that are not games (lowercase)
     "claude.exe", "code.exe", "windowsterminal.exe",
 }
 SHORT_CLIP_SECONDS = 3.0  # en_de mode: v3 mangles clips shorter than this (outputs Spanish/Cyrillic)
+LID_MIN_DE_PROB = 0.3  # real German short clips scored 0.48-0.85; an unsure English clip scored 0.05
 
 # Whisper model. Smaller = faster, less accurate. Good options:
 #   "base.en" / "small.en"  -> best for CPU (low latency), the fallback if no GPU
@@ -1984,7 +1985,8 @@ def detect_en_de(audio: np.ndarray) -> tuple[str, float, float]:
     """Whisper language ID restricted to en vs de -> (lang, p_en, p_de)."""
     probs = dict(load_whisper_model().detect_language(audio)[2])
     en, de = probs.get("en", 0.0), probs.get("de", 0.0)
-    return ("en" if en >= de else "de"), en, de
+    # Unsure about both -> English: a wrong German lock makes Canary translate.
+    return ("de" if de > en and de >= LID_MIN_DE_PROB else "en"), en, de
 
 
 def transcribe_short_clip(audio: np.ndarray) -> Optional[str]:
