@@ -32,6 +32,7 @@ Notes:
 from __future__ import annotations
 
 import ctypes
+import gc
 import json
 import math
 import os
@@ -98,9 +99,19 @@ STT_ENGINE = "parakeet"
 # Language handling:
 #   "english"      -> Parakeet v2 (English-only, same speed) + Whisper forced to English.
 #   "multilingual" -> Parakeet v3 (auto-detects among 25 European languages) + Whisper auto-detect.
+#   "en_de"        -> Parakeet v3; clips shorter than SHORT_CLIP_SECONDS get Whisper en/de LID + Canary locked to that language.
 # Authoritative for PARAKEET_MODEL_NAME/TRANSCRIPTION_LANGUAGE below; see _apply_language_mode().
 LANGUAGE_MODE = "english"
 PARAKEET_MODEL_NAME = "nemo-parakeet-tdt-0.6b-v2"
+CANARY_MODEL_NAME = "nemo-canary-1b-v2"
+AUTO_GAME_MODE = True  # watcher turns Game mode on for a full-screen game (read live, no restart)
+GAME_MODE_IGNORE_EXES = {  # full-screen apps that are not games (lowercase)
+    "explorer.exe", "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe",
+    "vlc.exe", "mpc-hc64.exe", "mpv.exe", "potplayermini64.exe", "teams.exe", "ms-teams.exe",
+    "zoom.exe", "powerpnt.exe", "applicationframehost.exe", "pythonw.exe", "python.exe",
+    "claude.exe", "code.exe", "windowsterminal.exe",
+}
+SHORT_CLIP_SECONDS = 3.0  # en_de mode: v3 mangles clips shorter than this (outputs Spanish/Cyrillic)
 
 # Whisper model. Smaller = faster, less accurate. Good options:
 #   "base.en" / "small.en"  -> best for CPU (low latency), the fallback if no GPU
@@ -215,6 +226,7 @@ SETTINGS_KEYS = {
     "space_between": "SPACE_BETWEEN_DICTATIONS",
     "display_name": "DISPLAY_NAME",
     "input_device": "INPUT_DEVICE",
+    "auto_game_mode": "AUTO_GAME_MODE",
 }
 
 # Settings keys that only take effect after a restart (surfaced to the UI as a chip).
@@ -244,7 +256,7 @@ def _apply_language_mode() -> None:
     Not a settings key itself for PARAKEET_MODEL_NAME: this stops a stale
     "parakeet_model" entry in settings.json from overriding the chosen mode.
     """
-    if LANGUAGE_MODE == "multilingual":
+    if LANGUAGE_MODE in ("multilingual", "en_de"):
         globals()["PARAKEET_MODEL_NAME"] = "nemo-parakeet-tdt-0.6b-v3"
         globals()["TRANSCRIPTION_LANGUAGE"] = None
     else:
@@ -328,6 +340,9 @@ input_stream: Optional[sd.InputStream] = None
 recorded_chunks: list[np.ndarray] = []
 whisper_model: Optional["FasterWhisperModel"] = None
 parakeet_model = None
+canary_model = None
+canary_failed = False  # en_de: once Canary/LID fails to load, stay on Parakeet v3
+last_stt_model = ""  # STT model that produced the latest final transcript (for history)
 model_load_lock = threading.Lock()
 listener: Optional[keyboard.Listener] = None
 hotkey: Optional[keyboard.HotKey] = None  # toggle-mode combo
@@ -342,6 +357,10 @@ last_final_text = ""  # The most recent pasted/clean transcript, shown in the ma
 _prev_dictation_had_trailing_space = True  # Tracks SPACE_BETWEEN_DICTATIONS state across dictations.
 live_partial_text = ""  # ponytail: plain str, assignment is atomic; a stale frame costs nothing.
 webview_window = None  # The pywebview main window, created hidden on the main thread at startup.
+game_mode_active = False  # Game mode: GPU models released, refinement + en_de skipped
+_game_lock = threading.Lock()
+_auto_game_pid: Optional[int] = None  # PID that triggered an automatic entry
+_suppressed_pid: Optional[int] = None  # PID the user switched Game mode off for
 _ollama_pinned = False  # Set by _decide_ollama_pin(); drives the unload-on-quit path.
 _dll_directory_handles = []
 _app_icon_cache: dict[str, object] = {}  # exe path -> PIL Image (or None when unavailable)
@@ -717,7 +736,7 @@ def record_history(
         app = Path(exe_path).stem if exe_path else ""
         window_title = get_foreground_window_title()
         model = OLLAMA_MODEL if ENABLE_OLLAMA_REFINEMENT else (
-            PARAKEET_MODEL_NAME if STT_ENGINE == "parakeet" else WHISPER_MODEL_NAME
+            last_stt_model or (PARAKEET_MODEL_NAME if STT_ENGINE == "parakeet" else WHISPER_MODEL_NAME)
         )
 
         audio_path = ""
@@ -1351,6 +1370,9 @@ class UiApi:
             "badge": "Ready" if ollama_ok else "Warning",
         })
 
+        if game_mode_active:
+            rows.append({"title": "Game mode on", "subtitle": "AI cleanup and English/German lock paused", "ok": True, "badge": "On"})
+
         rows.append({
             "title": "Hotkey active",
             "subtitle": HOTKEY,
@@ -1359,6 +1381,13 @@ class UiApi:
         })
 
         return rows
+
+    def get_game_mode(self) -> bool:
+        return game_mode_active
+
+    def set_game_mode(self, on: bool) -> bool:
+        set_game_mode_manual(bool(on))
+        return bool(on)  # exit finishes in a background thread
 
     def get_engines(self) -> list[dict]:
         parakeet_dirs = _hf_cache_dirs(["*parakeet*"])
@@ -1370,6 +1399,8 @@ class UiApi:
                 "name": f"Parakeet TDT 0.6B {'v3' if parakeet_is_v3 else 'v2'}",
                 "vendor": "NVIDIA",
                 "desc": "Fastest transcription, built-in punctuation. " + (
+                    "English + German: clips under 3 s use Whisper language ID + Canary 1B (locked to en/de); longer clips use Parakeet v3."
+                    if LANGUAGE_MODE == "en_de" else
                     "Auto-detects 25 European languages." if parakeet_is_v3 else "English only."
                 ),
                 "perf_note": "≈ 0.03 s per pass on this PC · WER 6.3% (Open ASR)",
@@ -1678,6 +1709,129 @@ def open_main_window() -> None:
         log(f"Could not show the main window: {exc}")
 
 
+def enter_game_mode(reason: str) -> None:
+    """Free GPU memory for a game: unload Ollama, drop Canary + Whisper. Parakeet stays."""
+    global game_mode_active, canary_model, whisper_model, _ollama_pinned
+    with _game_lock:
+        if game_mode_active:
+            return
+        game_mode_active = True  # first, so nothing lazily reloads while we release
+        if ENABLE_OLLAMA_REFINEMENT:
+            unload_ollama_model()
+        _ollama_pinned = False
+        with model_load_lock:
+            canary_model = None
+            if STT_ENGINE == "parakeet":  # in whisper-engine mode it is the main model
+                whisper_model = None
+        gc.collect()  # verified: dropping the refs frees the VRAM (ORT sessions / ctranslate2 are refcounted)
+        _set_tray_title()
+        log(f"Game mode ON ({reason})")
+
+
+def exit_game_mode(reason: str) -> None:
+    def restore() -> None:
+        global game_mode_active
+        with _game_lock:
+            if not game_mode_active:
+                return
+            game_mode_active = False
+            _set_tray_title()
+            if LANGUAGE_MODE == "en_de" and STT_ENGINE == "parakeet":
+                warm_en_de_models()
+            warm_ollama_model()  # re-runs the pin decision
+            log(f"Game mode OFF ({reason})")
+
+    if game_mode_active:
+        threading.Thread(target=restore, daemon=True).start()
+
+
+def _set_tray_title() -> None:
+    if tray_icon is not None:
+        try:
+            tray_icon.title = "Local Flow \u2014 Game mode" if game_mode_active else "Local Flow"
+            tray_icon.update_menu()  # pystray caches the menu; re-evaluate the checked state
+        except Exception:
+            pass
+
+
+def set_game_mode_manual(on: bool) -> None:
+    global _auto_game_pid, _suppressed_pid
+    if on:
+        _auto_game_pid = None  # manual entry: the watcher must never turn it off
+        enter_game_mode("manual")
+    else:
+        if _auto_game_pid is not None:
+            _suppressed_pid = _auto_game_pid  # game still running: don't re-enter for it
+            _auto_game_pid = None
+        exit_game_mode("manual")
+
+
+def _pid_alive(pid: int) -> bool:
+    import win32api, win32con, win32process
+    try:
+        handle = win32api.OpenProcess(win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    except Exception:
+        return False
+    try:
+        return win32process.GetExitCodeProcess(handle) == 259  # STILL_ACTIVE
+    finally:
+        win32api.CloseHandle(handle)
+
+
+def _foreground_fullscreen() -> Optional[tuple[int, str]]:
+    """(pid, lowercase exe name) of the foreground window if it covers its monitor and is not ignored."""
+    import win32api, win32con, win32gui, win32process
+    hwnd = win32gui.GetForegroundWindow()
+    if not hwnd or win32gui.GetClassName(hwnd) in ("Progman", "WorkerW", "Shell_TrayWnd"):
+        return None
+    monitor = win32api.GetMonitorInfo(win32api.MonitorFromWindow(hwnd, win32con.MONITOR_DEFAULTTONEAREST))["Monitor"]
+    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+    if not (left <= monitor[0] and top <= monitor[1] and right >= monitor[2] and bottom >= monitor[3]):
+        return None
+    pid = win32process.GetWindowThreadProcessId(hwnd)[1]
+    handle = win32api.OpenProcess(win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = ctypes.c_ulong(len(buf))
+        ctypes.windll.kernel32.QueryFullProcessImageNameW(int(handle), 0, buf, ctypes.byref(size))
+    finally:
+        win32api.CloseHandle(handle)
+    exe = os.path.basename(buf.value).lower()
+    return None if exe in GAME_MODE_IGNORE_EXES else (pid, exe)
+
+
+def game_mode_watcher() -> None:
+    """Poll every 2 s: enter Game mode once the same full-screen app holds the foreground for
+    2 polls; leave it only when that process ends. Never raises."""
+    global _auto_game_pid, _suppressed_pid
+    candidate: Optional[int] = None
+    last_error = 0.0
+    while not shutdown_event.wait(2.0):
+        try:
+            if not AUTO_GAME_MODE:
+                candidate = None
+                continue
+            if _suppressed_pid is not None and not _pid_alive(_suppressed_pid):
+                _suppressed_pid = None
+            if _auto_game_pid is not None and not _pid_alive(_auto_game_pid):
+                pid, _auto_game_pid = _auto_game_pid, None
+                exit_game_mode(f"game exited, pid {pid}")
+            if game_mode_active:
+                continue
+            found = _foreground_fullscreen()
+            pid = found[0] if found and found[0] != _suppressed_pid else None
+            if pid is not None and pid == candidate:
+                _auto_game_pid = pid
+                candidate = None
+                enter_game_mode(f"auto: {found[1]}")
+            else:
+                candidate = pid
+        except Exception as exc:
+            if time.time() - last_error > 60:
+                last_error = time.time()
+                log(f"Game mode watcher error: {exc}")
+
+
 def start_tray_icon() -> None:
     """Start an optional Windows tray icon."""
     global tray_icon
@@ -1692,6 +1846,10 @@ def start_tray_icon() -> None:
     menu = pystray.Menu(
         pystray.MenuItem("Open Local Flow", lambda icon, item: open_main_window()),
         pystray.MenuItem("Toggle recording", lambda icon, item: toggle_recording()),
+        pystray.MenuItem(
+            "Game mode", lambda icon, item: set_game_mode_manual(not game_mode_active),
+            checked=lambda item: game_mode_active,
+        ),
         pystray.MenuItem("Quit Local Flow", quit_app),
     )
     tray_icon = pystray.Icon("Local Flow", make_tray_image(current_status), "Local Flow", menu)
@@ -1756,6 +1914,8 @@ def load_whisper_model() -> "FasterWhisperModel":
 
     if whisper_model is not None:
         return whisper_model
+    if game_mode_active and STT_ENGINE == "parakeet":
+        raise RuntimeError("Game mode: Whisper stays unloaded")
 
     configure_cuda_dll_search()
     from faster_whisper import WhisperModel
@@ -1782,6 +1942,74 @@ def load_whisper_model() -> "FasterWhisperModel":
     log("Whisper model loaded.")
     set_status("idle")
     return whisper_model
+
+
+def load_canary_model():
+    """Load Canary (language-locked STT for short clips in en_de mode) once."""
+    global canary_model
+
+    with model_load_lock:
+        if canary_model is not None:
+            return canary_model
+        if game_mode_active:
+            raise RuntimeError("Game mode: Canary stays unloaded")
+        configure_cuda_dll_search()
+        import onnx_asr
+
+        log(f"Loading Canary '{CANARY_MODEL_NAME}' (CUDA)...")
+        started = time.perf_counter()
+        canary_model = onnx_asr.load_model(
+            CANARY_MODEL_NAME,
+            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+        log(f"Canary model loaded ({time.perf_counter() - started:.2f}s).")
+        return canary_model
+
+
+def warm_en_de_models() -> None:
+    """en_de mode: load + warm Canary and the Whisper LID model. Never raises."""
+    global canary_failed
+    try:
+        started = time.perf_counter()
+        audio = np.zeros(SAMPLE_RATE, dtype=np.float32)
+        load_canary_model().recognize(audio, sample_rate=SAMPLE_RATE, language="en")
+        load_whisper_model().detect_language(audio)
+        log(f"Canary + LID warm-up ({time.perf_counter() - started:.2f}s).")
+    except Exception as exc:
+        canary_failed = True
+        log(f"Canary/LID unavailable, short clips will use Parakeet v3: {exc}")
+
+
+def detect_en_de(audio: np.ndarray) -> tuple[str, float, float]:
+    """Whisper language ID restricted to en vs de -> (lang, p_en, p_de)."""
+    probs = dict(load_whisper_model().detect_language(audio)[2])
+    en, de = probs.get("en", 0.0), probs.get("de", 0.0)
+    return ("en" if en >= de else "de"), en, de
+
+
+def transcribe_short_clip(audio: np.ndarray) -> Optional[str]:
+    """en_de mode: LID + Canary for clips < SHORT_CLIP_SECONDS. None = use Parakeet v3."""
+    global canary_failed, last_stt_model
+
+    seconds = len(audio) / SAMPLE_RATE
+    if canary_failed or game_mode_active or seconds >= SHORT_CLIP_SECONDS:
+        return None
+    try:
+        started = time.perf_counter()
+        lang, en, de = detect_en_de(audio)
+        text = str(load_canary_model().recognize(audio, sample_rate=SAMPLE_RATE, language=lang)).strip()
+    except Exception as exc:
+        if game_mode_active:  # models were released mid-clip; not a real failure
+            return None
+        canary_failed = True
+        log(f"Short-clip Canary path failed, falling back to Parakeet v3: {exc}")
+        return None
+    last_stt_model = CANARY_MODEL_NAME
+    log(
+        f"Short clip {seconds:.1f}s: LID en={en:.2f} de={de:.2f} -> Canary {lang} "
+        f"({time.perf_counter() - started:.2f}s)"
+    )
+    return text
 
 
 def audio_callback(indata: np.ndarray, frames: int, callback_time, status) -> None:
@@ -1895,7 +2123,13 @@ def write_temp_wav() -> tuple[Path, float]:
 
 
 def transcribe_audio(source, quiet: bool = False) -> str:
-    """Transcribe a WAV path or a float32 numpy array with the configured STT engine."""
+    """Transcribe a WAV path or a float32 numpy array with the configured STT engine.
+
+    quiet=True is the live preview: it always takes the plain Parakeet/Whisper path.
+    """
+    global last_stt_model
+
+    en_de_final = LANGUAGE_MODE == "en_de" and not quiet and not game_mode_active
     if STT_ENGINE == "parakeet":
         model = load_parakeet_model()
         try:
@@ -1903,6 +2137,13 @@ def transcribe_audio(source, quiet: bool = False) -> str:
                 audio, sample_rate = sf.read(str(source), dtype="float32")
             else:
                 audio, sample_rate = source, SAMPLE_RATE
+            if en_de_final and sample_rate == SAMPLE_RATE:
+                mono = audio.mean(axis=1) if audio.ndim > 1 else audio
+                short_text = transcribe_short_clip(mono)
+                if short_text is not None:
+                    return short_text
+            if not quiet:
+                last_stt_model = PARAKEET_MODEL_NAME
             text = str(model.recognize(audio, sample_rate=sample_rate)).strip()
         except Exception as exc:
             log(f"Parakeet transcription failed: {exc}")
@@ -1912,10 +2153,16 @@ def transcribe_audio(source, quiet: bool = False) -> str:
         return text  # ponytail: parakeet already punctuates and capitalizes.
 
     model = load_whisper_model()
+    language = TRANSCRIPTION_LANGUAGE
     try:
+        if en_de_final:  # same en/de LID as the Parakeet path, applied to every final clip
+            audio = sf.read(str(source), dtype="float32")[0] if isinstance(source, Path) else source
+            language = detect_en_de(audio.mean(axis=1) if audio.ndim > 1 else audio)[0]
+        if not quiet:
+            last_stt_model = WHISPER_MODEL_NAME
         segments, info = model.transcribe(
             str(source) if isinstance(source, Path) else source,
-            language=TRANSCRIPTION_LANGUAGE,
+            language=language,
             beam_size=1,
             best_of=1,
             vad_filter=True,
@@ -1981,7 +2228,7 @@ def refine_with_ollama(raw_text: str) -> str:
     if not raw_text:
         return ""
 
-    if not ENABLE_OLLAMA_REFINEMENT:
+    if not ENABLE_OLLAMA_REFINEMENT or game_mode_active:  # a call would reload the model mid-game
         return raw_text
 
     prompt = f"""{SYSTEM_PROMPT}
@@ -2509,6 +2756,8 @@ if __name__ == "__main__":
             started = time.perf_counter()
             model.recognize(np.zeros(SAMPLE_RATE, dtype=np.float32), sample_rate=SAMPLE_RATE)
             log(f"Parakeet warm-up ({time.perf_counter() - started:.2f}s).")
+            if LANGUAGE_MODE == "en_de":
+                warm_en_de_models()
         else:
             load_whisper_model()
     except Exception as exc:
@@ -2516,6 +2765,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     threading.Thread(target=warm_ollama_model, daemon=True).start()
+    threading.Thread(target=game_mode_watcher, daemon=True).start()
 
     if ACTIVATION_MODE == "hold":
         hold_hotkey = HoldHotkey(HOTKEY, start_recording, stop_recording)

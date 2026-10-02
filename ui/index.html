@@ -246,6 +246,24 @@
           </div>
           <div class="setting-row">
             <div class="setting-row-text">
+              <div class="setting-row-title">Game mode</div>
+              <div class="setting-row-subtitle">Frees ~16 GB of GPU memory: pauses AI cleanup and the English/German lock. Dictation keeps working.</div>
+            </div>
+            <div class="setting-row-control">
+              <label class="switch"><input type="checkbox" id="game-mode-toggle"><span class="slider"></span></label>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Auto game mode</div>
+              <div class="setting-row-subtitle">Turn on Game mode when a full-screen game starts; turn it off when the game closes.</div>
+            </div>
+            <div class="setting-row-control">
+              <label class="switch"><input type="checkbox" id="auto-game-mode-toggle"><span class="slider"></span></label>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
               <div class="setting-row-title">Updates</div>
               <div class="setting-row-subtitle">Version 1.0</div>
             </div>
@@ -332,7 +350,8 @@
             </div>
             <div class="setting-row-control">
               <select class="select-control" id="language-mode-select">
-                <option value="english">English only — fastest, most accurate</option>
+                <option value="english">English only</option>
+                <option value="en_de">English + German — short clips language-locked</option>
                 <option value="multilingual">Multilingual — auto-detect 25 European languages</option>
               </select>
             </div>

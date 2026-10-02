@@ -800,6 +800,7 @@
     document.getElementById("language-mode-select").value = snapshot.language_mode || "english";
     document.getElementById("overlay-scale-select").value = String(snapshot.overlay_scale || 1);
     document.getElementById("live-preview-toggle").checked = !!snapshot.live_preview;
+    document.getElementById("auto-game-mode-toggle").checked = !!snapshot.auto_game_mode;
 
     document.getElementById("copy-clipboard-toggle").checked = !!snapshot.copy_to_clipboard;
     document.getElementById("lowercase-first-toggle").checked = !!snapshot.lowercase_first;
@@ -839,6 +840,9 @@
       loadMicList(snapshot.input_device);
     }).catch(function () {});
     loadLaunchAtLogin();
+    callApi("get_game_mode").then(function (on) {
+      document.getElementById("game-mode-toggle").checked = !!on;
+    }).catch(function () {});
   }
 
   var hotkeyTestPolling = null;
@@ -933,6 +937,11 @@
     bindSelect("language-mode-select", "language_mode", false);
     bindSelect("overlay-scale-select", "overlay_scale", true);
     bindToggle("live-preview-toggle", "live_preview");
+    bindToggle("auto-game-mode-toggle", "auto_game_mode");
+    document.getElementById("game-mode-toggle").addEventListener("change", function (e) {
+      var a = api();
+      if (a) a.set_game_mode(e.target.checked).catch(function () {});
+    });
 
     bindToggle("copy-clipboard-toggle", "copy_to_clipboard");
     bindToggle("lowercase-first-toggle", "lowercase_first");
