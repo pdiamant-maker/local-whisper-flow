@@ -86,6 +86,7 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "qwen2.5:7b-instruct"  # Higher polish. Use "qwen2.5:3b-instruct" for lower latency.
 OLLAMA_TIMEOUT_SECONDS = 90
 OLLAMA_KEEP_ALIVE = "30m"
+OLLAMA_PIN_MIN_FREE_MB = 8000  # Pin the model on GPU (keep_alive=-1) at startup when at least this much VRAM is free.
 ENABLE_OLLAMA_REFINEMENT = True
 OLLAMA_NUM_PREDICT = 96
 
@@ -93,7 +94,13 @@ OLLAMA_NUM_PREDICT = 96
 #   "parakeet" -> NVIDIA Parakeet via onnx-asr. Fast, punctuated output, needs the GPU wheels.
 #   "whisper"  -> faster-whisper fallback, works on CPU.
 STT_ENGINE = "parakeet"
-PARAKEET_MODEL_NAME = "nemo-parakeet-tdt-0.6b-v3"
+
+# Language handling:
+#   "english"      -> Parakeet v2 (English-only, same speed) + Whisper forced to English.
+#   "multilingual" -> Parakeet v3 (auto-detects among 25 European languages) + Whisper auto-detect.
+# Authoritative for PARAKEET_MODEL_NAME/TRANSCRIPTION_LANGUAGE below; see _apply_language_mode().
+LANGUAGE_MODE = "english"
+PARAKEET_MODEL_NAME = "nemo-parakeet-tdt-0.6b-v2"
 
 # Whisper model. Smaller = faster, less accurate. Good options:
 #   "base.en" / "small.en"  -> best for CPU (low latency), the fallback if no GPU
@@ -129,7 +136,7 @@ LIVE_TRANSCRIBE_WINDOW_SECONDS = 15.0  # The overlay only shows the tail, so a f
 OVERLAY_PANEL_WIDTH = 480
 OVERLAY_PANEL_HEIGHT = 150
 OVERLAY_BOTTOM_MARGIN = 80
-TRANSCRIPTION_LANGUAGE = "en"  # Skips language detection for faster English dictation.
+TRANSCRIPTION_LANGUAGE = "en"  # Set by LANGUAGE_MODE; None means auto-detect (Whisper fallback only).
 HIDE_CONSOLE_ON_START = os.environ.get("LOCAL_FLOW_DEBUG_CONSOLE") != "1"
 SHOW_METRICS = True  # Show a live "total 0.7s · whisper 0.3 · llm 0.1" line on the overlay after each dictation.
 ENABLE_LIVE_PREVIEW = True  # Show the streaming partial transcript on the overlay.
@@ -185,7 +192,7 @@ def _hf_cache_dir_size(patterns: list[str]) -> Optional[int]:
 SETTINGS_KEYS = {
     "hotkey": "HOTKEY",
     "stt_engine": "STT_ENGINE",
-    "parakeet_model": "PARAKEET_MODEL_NAME",
+    "language_mode": "LANGUAGE_MODE",
     "whisper_model": "WHISPER_MODEL_NAME",
     "whisper_device": "WHISPER_DEVICE",
     "whisper_compute_type": "WHISPER_COMPUTE_TYPE",
@@ -213,7 +220,7 @@ SETTINGS_KEYS = {
 # Settings keys that only take effect after a restart (surfaced to the UI as a chip).
 RESTART_REQUIRED_KEYS = {
     "stt_engine", "whisper_model", "whisper_device", "whisper_compute_type",
-    "parakeet_model", "hotkey", "activation_mode", "paste_last_hotkey",
+    "language_mode", "hotkey", "activation_mode", "paste_last_hotkey",
     "overlay_scale", "tray_icon", "floating_overlay",
 }
 
@@ -229,6 +236,20 @@ def _rebind_live_interval_if_default(explicit_keys: set[str]) -> None:
     # Keep the parakeet 0.25 / whisper 1.0 default rule, unless the file set it explicitly.
     if "live_interval_seconds" not in explicit_keys:
         globals()["LIVE_TRANSCRIBE_INTERVAL_SECONDS"] = 0.25 if STT_ENGINE == "parakeet" else 1.0
+
+
+def _apply_language_mode() -> None:
+    """LANGUAGE_MODE is authoritative for the Parakeet model + Whisper language.
+
+    Not a settings key itself for PARAKEET_MODEL_NAME: this stops a stale
+    "parakeet_model" entry in settings.json from overriding the chosen mode.
+    """
+    if LANGUAGE_MODE == "multilingual":
+        globals()["PARAKEET_MODEL_NAME"] = "nemo-parakeet-tdt-0.6b-v3"
+        globals()["TRANSCRIPTION_LANGUAGE"] = None
+    else:
+        globals()["PARAKEET_MODEL_NAME"] = "nemo-parakeet-tdt-0.6b-v2"
+        globals()["TRANSCRIPTION_LANGUAGE"] = "en"
 
 
 def load_settings() -> None:
@@ -259,6 +280,7 @@ def load_settings() -> None:
             explicit_keys.add(json_key)
 
         _rebind_live_interval_if_default(explicit_keys)
+        _apply_language_mode()
 
 
 def save_settings(updates: dict) -> None:
@@ -277,6 +299,7 @@ def save_settings(updates: dict) -> None:
                 globals()[target] = current[json_key]
                 explicit_keys.add(json_key)
         _rebind_live_interval_if_default(explicit_keys)
+        _apply_language_mode()
 
 
 SYSTEM_PROMPT = """You clean raw speech-to-text dictation.
@@ -319,6 +342,7 @@ last_final_text = ""  # The most recent pasted/clean transcript, shown in the ma
 _prev_dictation_had_trailing_space = True  # Tracks SPACE_BETWEEN_DICTATIONS state across dictations.
 live_partial_text = ""  # ponytail: plain str, assignment is atomic; a stale frame costs nothing.
 webview_window = None  # The pywebview main window, created hidden on the main thread at startup.
+_ollama_pinned = False  # Set by _decide_ollama_pin(); drives the unload-on-quit path.
 _dll_directory_handles = []
 _app_icon_cache: dict[str, object] = {}  # exe path -> PIL Image (or None when unavailable)
 _icon_warning_logged = False
@@ -354,7 +378,9 @@ def log(message: str) -> None:
     line = f"[{timestamp}] {message}"
     try:
         print(line, flush=True)
-    except OSError:
+    except Exception:
+        # ponytail: stdout can't encode some characters (e.g. cp1252 console + non-ASCII
+        # transcript); never let that abort the caller (file write below still has it in utf-8).
         pass
 
     try:
@@ -1260,6 +1286,8 @@ def quit_app(icon=None, item=None) -> None:
     shutdown_event.set()
     if is_recording:
         stop_recording()
+    if _ollama_pinned:
+        unload_ollama_model()
     if listener is not None:
         listener.stop()
     if tray_icon is not None:
@@ -1318,7 +1346,7 @@ class UiApi:
             ollama_ok = False
         rows.append({
             "title": "Cleanup model",
-            "subtitle": f"{OLLAMA_MODEL}" if ollama_ok else f"Ollama unreachable ({OLLAMA_MODEL})",
+            "subtitle": (f"{OLLAMA_MODEL} (pinned on GPU)" if _ollama_pinned else OLLAMA_MODEL) if ollama_ok else f"Ollama unreachable ({OLLAMA_MODEL})",
             "ok": ollama_ok,
             "badge": "Ready" if ollama_ok else "Warning",
         })
@@ -1335,12 +1363,15 @@ class UiApi:
     def get_engines(self) -> list[dict]:
         parakeet_dirs = _hf_cache_dirs(["*parakeet*"])
         whisper_dirs = _hf_cache_dirs(["*whisper-large-v3-turbo*", "*large-v3-turbo*"])
+        parakeet_is_v3 = PARAKEET_MODEL_NAME.endswith("v3")
         return [
             {
                 "key": "parakeet",
-                "name": "Parakeet TDT 0.6B v3",
+                "name": f"Parakeet TDT 0.6B {'v3' if parakeet_is_v3 else 'v2'}",
                 "vendor": "NVIDIA",
-                "desc": "Fastest transcription, built-in punctuation. 25 European languages.",
+                "desc": "Fastest transcription, built-in punctuation. " + (
+                    "Auto-detects 25 European languages." if parakeet_is_v3 else "English only."
+                ),
                 "perf_note": "≈ 0.03 s per pass on this PC · WER 6.3% (Open ASR)",
                 "size": _hf_cache_dir_size(["*parakeet*"]),
                 "active": STT_ENGINE == "parakeet",
@@ -1807,7 +1838,11 @@ def start_recording() -> None:
         is_recording = True
         set_status("recording")
         threading.Thread(target=live_transcribe_loop, daemon=True).start()
-        log("RECORDING ON  | Speak now. Press Ctrl+Shift+J again to stop.")
+        hotkey_display = _format_hotkey_display(HOTKEY) or HOTKEY
+        if ACTIVATION_MODE == "hold":
+            log(f"RECORDING ON  | Speak now. Release {hotkey_display} to stop.")
+        else:
+            log(f"RECORDING ON  | Speak now. Press {hotkey_display} again to stop.")
 
 
 def stop_recording() -> None:
@@ -2002,10 +2037,87 @@ Clean final statement:"""
     return clean_text
 
 
+def _ollama_ps() -> Optional[list]:
+    """GET /api/ps. Returns the loaded-models list, or None if Ollama is unreachable."""
+    base_url = OLLAMA_URL.rsplit("/", 1)[0]
+    try:
+        with urllib.request.urlopen(f"{base_url}/ps", timeout=3) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return data.get("models", [])
+    except Exception:
+        return None
+
+
+def _free_vram_mb() -> Optional[int]:
+    """Free VRAM in MB via nvidia-smi, or None if it's unavailable/fails."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if result.returncode != 0:
+            return None
+        return int(result.stdout.strip().splitlines()[0].strip())
+    except Exception:
+        return None
+
+
+def _decide_ollama_pin() -> None:
+    """Pin the cleanup model on the GPU (keep_alive=-1) when it's already loaded or there's
+    plenty of free VRAM, so it survives idle eviction and the next dictation doesn't cold-load.
+    Must run before the warm-up request: every /api/generate call sends keep_alive, so leaving
+    OLLAMA_KEEP_ALIVE at "30m" would reset the pin on the very next refinement call.
+    """
+    global OLLAMA_KEEP_ALIVE, _ollama_pinned
+
+    models = _ollama_ps()
+    if models is None:
+        log("Ollama model not pinned: Ollama is not reachable yet.")
+        return
+
+    if any(model.get("name") == OLLAMA_MODEL for model in models):
+        OLLAMA_KEEP_ALIVE = -1
+        _ollama_pinned = True
+        log("Ollama model pinned on GPU (already loaded).")
+        return
+
+    free_mb = _free_vram_mb()
+    if free_mb is None:
+        log("Ollama model not pinned: nvidia-smi unavailable.")
+    elif free_mb >= OLLAMA_PIN_MIN_FREE_MB:
+        OLLAMA_KEEP_ALIVE = -1
+        _ollama_pinned = True
+        log(f"Ollama model pinned on GPU (free VRAM {free_mb} MB).")
+    else:
+        log(f"Ollama model not pinned: only {free_mb} MB free VRAM.")
+
+
+def unload_ollama_model() -> None:
+    """Release the GPU-pinned cleanup model on quit (keep_alive=-1 would otherwise hold it forever)."""
+    payload = {"model": OLLAMA_MODEL, "keep_alive": 0}
+    request = urllib.request.Request(
+        OLLAMA_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5):
+            pass
+        log("Ollama model unloaded.")
+    except Exception:
+        pass
+
+
 def warm_ollama_model() -> None:
     """Warm the Ollama model in the background to reduce first-use latency."""
     if not ENABLE_OLLAMA_REFINEMENT:
         return
+
+    _decide_ollama_pin()
 
     payload = {
         "model": OLLAMA_MODEL,
@@ -2374,7 +2486,7 @@ def print_startup_banner() -> None:
         log(f"STT engine: parakeet ({PARAKEET_MODEL_NAME}, CUDA)")
     else:
         log(f"STT engine: whisper ({WHISPER_MODEL_NAME} on {WHISPER_DEVICE}, {WHISPER_COMPUTE_TYPE})")
-    log(f"Transcription language: {TRANSCRIPTION_LANGUAGE}")
+    log(f"Transcription language: {TRANSCRIPTION_LANGUAGE or 'auto-detect'} ({LANGUAGE_MODE})")
     log(f"Ollama refinement: {'on' if ENABLE_OLLAMA_REFINEMENT else 'off'}")
     log(f"Tray icon: {'on' if ENABLE_TRAY_ICON else 'off'}")
     log(f"Floating overlay: {'on' if ENABLE_FLOATING_OVERLAY else 'off'}")

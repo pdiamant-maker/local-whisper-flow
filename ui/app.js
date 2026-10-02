@@ -71,6 +71,15 @@
 
   // ---- Mic / status polling ----
   var lastFinalText = "";
+  var idleMicHint = "Press your hotkey anywhere or start here"; // updated once the real hotkey loads
+
+  function updateIdleMicHint(snapshot) {
+    if (!snapshot) return;
+    var display = formatHotkeyDisplay(snapshot.hotkey);
+    if (!display || display === "Not set") return;
+    var verb = snapshot.activation_mode === "hold" ? "Hold" : "Press";
+    idleMicHint = verb + " " + display + " anywhere or start here";
+  }
 
   function applyStatus(data) {
     if (!data) return;
@@ -85,7 +94,7 @@
       micSubtitle.textContent = "Speak now";
     } else {
       micTitle.textContent = "Ready to dictate";
-      micSubtitle.textContent = "Press Ctrl+Shift+J anywhere or start here";
+      micSubtitle.textContent = idleMicHint;
     }
 
     if (typeof data.last_final_text === "string" && data.last_final_text !== lastFinalText) {
@@ -788,6 +797,7 @@
     document.getElementById("paste-hotkey-recorder").textContent = formatHotkeyDisplay(snapshot.paste_last_hotkey);
     document.getElementById("activation-mode-select").value = snapshot.activation_mode || "toggle";
 
+    document.getElementById("language-mode-select").value = snapshot.language_mode || "english";
     document.getElementById("overlay-scale-select").value = String(snapshot.overlay_scale || 1);
     document.getElementById("live-preview-toggle").checked = !!snapshot.live_preview;
 
@@ -920,6 +930,7 @@
     document.getElementById("mic-refresh").addEventListener("click", function () {
       loadMicList(document.getElementById("mic-select").value);
     });
+    bindSelect("language-mode-select", "language_mode", false);
     bindSelect("overlay-scale-select", "overlay_scale", true);
     bindToggle("live-preview-toggle", "live_preview");
 
@@ -981,6 +992,7 @@
     callApi("get_settings").then(function (snapshot) {
       var name = document.querySelector(".profile-name");
       if (name && snapshot && snapshot.display_name) name.textContent = snapshot.display_name;
+      updateIdleMicHint(snapshot);
     }).catch(function () {});
   }
 
