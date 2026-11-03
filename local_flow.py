@@ -2368,6 +2368,11 @@ def warm_ollama_model() -> None:
     if not ENABLE_OLLAMA_REFINEMENT:
         return
 
+    # At boot Local Flow can start before Ollama; wait so the pin decision isn't skipped.
+    deadline = time.monotonic() + 120
+    while _ollama_ps() is None and time.monotonic() < deadline and not shutdown_event.is_set():
+        time.sleep(2)
+
     _decide_ollama_pin()
 
     payload = {

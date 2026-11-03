@@ -998,6 +998,7 @@
     initCustomDictionary();
     initSettings();
     loadHealth();
+    setInterval(loadHealth, 5000); // Ollama / models can come up after the window opens at boot
     callApi("get_settings").then(function (snapshot) {
       var name = document.querySelector(".profile-name");
       if (name && snapshot && snapshot.display_name) name.textContent = snapshot.display_name;
