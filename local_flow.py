@@ -94,10 +94,7 @@ OLLAMA_NUM_PREDICT = 96
 # Speech-to-text engine:
 #   "parakeet" -> NVIDIA Parakeet via onnx-asr. Fast, punctuated output, needs the GPU wheels.
 #   "whisper"  -> faster-whisper fallback, works on CPU.
-#   "nemotron" -> NVIDIA Nemotron Unified ASR via NeMo, in a worker process on .venv-nemo (experimental).
 STT_ENGINE = "parakeet"
-NEMOTRON_MODEL_NAME = "nvidia/nemotron-labs-unified-asr-0.6b"
-NEMOTRON_PYTHON = Path(__file__).resolve().parent / ".venv-nemo" / "Scripts" / "python.exe"
 
 # Language handling:
 #   "english"      -> Parakeet v2 (English-only, same speed) + Whisper forced to English.
@@ -1433,20 +1430,6 @@ class UiApi:
                 "active": STT_ENGINE == "whisper",
                 "downloaded": bool(whisper_dirs),
             },
-            {
-                "key": "nemotron",
-                "name": "Nemotron Unified ASR 0.6B",
-                "vendor": "NVIDIA",
-                "desc": "Experimental. Newer NVIDIA model, 25 European languages, runs through NeMo. "
-                        "First start loads for about 30 s. " + (
-                    "English + German: clips under 3 s still use Whisper language ID + Canary 1B."
-                    if LANGUAGE_MODE == "en_de" else ""
-                ) + ("" if NEMOTRON_PYTHON.exists() else " Needs the .venv-nemo folder."),
-                "perf_note": "≈ 0.06–0.16 s per pass on this PC · WER 4.7% English (model card)",
-                "size": _hf_cache_dir_size(["*nemotron-labs-unified-asr*"]),
-                "active": STT_ENGINE == "nemotron",
-                "downloaded": bool(_hf_cache_dirs(["*nemotron-labs-unified-asr*"])),
-            },
         ]
 
     def get_ollama_models(self) -> list[dict]:
@@ -1900,67 +1883,15 @@ def start_tray_icon() -> None:
 
 
 def primary_stt_name() -> str:
-    if STT_ENGINE == "nemotron":
-        return NEMOTRON_MODEL_NAME
-    return PARAKEET_MODEL_NAME if STT_ENGINE == "parakeet" else WHISPER_MODEL_NAME
-
-
-class NemotronClient:
-    """Talks to nemotron_worker.py over pipes; same recognize() shape as an onnx-asr model."""
-
-    def __init__(self) -> None:
-        if not NEMOTRON_PYTHON.exists():
-            raise RuntimeError(f"Nemotron venv missing: {NEMOTRON_PYTHON}")
-        self._lock = threading.Lock()  # live preview and final pass share one pipe
-        self._stderr = (APP_DIR / "nemotron_worker.log").open("w", encoding="utf-8")
-        self._proc = subprocess.Popen(
-            [str(NEMOTRON_PYTHON), str(APP_DIR / "nemotron_worker.py"), NEMOTRON_MODEL_NAME],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=self._stderr,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )  # exits by itself when our end of stdin closes (app quit or crash)
-        if json.loads(self._proc.stdout.readline() or b"{}").get("ready") is not True:
-            raise RuntimeError("Nemotron worker failed to start; see nemotron_worker.log")
-
-    def recognize(self, audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> str:
-        if sample_rate != SAMPLE_RATE:
-            raise ValueError(f"Nemotron needs {SAMPLE_RATE} Hz audio, got {sample_rate}")
-        audio = np.ascontiguousarray(audio.mean(axis=1) if audio.ndim > 1 else audio, dtype=np.float32)
-        lang = "en" if LANGUAGE_MODE == "english" else "auto"
-        with self._lock:
-            self._proc.stdin.write(json.dumps({"lang": lang, "n": len(audio)}).encode() + b"\n")
-            self._proc.stdin.write(audio.tobytes())
-            self._proc.stdin.flush()
-            line = self._proc.stdout.readline()
-        if not line:
-            raise RuntimeError("Nemotron worker exited; see nemotron_worker.log")
-        reply = json.loads(line)
-        if "error" in reply:
-            raise RuntimeError(reply["error"])
-        return reply["text"]
+    return WHISPER_MODEL_NAME if STT_ENGINE == "whisper" else PARAKEET_MODEL_NAME
 
 
 def load_parakeet_model():
-    """Load the primary STT model (Parakeet ONNX, or the Nemotron worker) once so dictation stays snappy."""
+    """Load the Parakeet ONNX model once so hotkey dictation stays snappy."""
     global parakeet_model
 
     with model_load_lock:
         if parakeet_model is not None:
-            return parakeet_model
-
-        if STT_ENGINE == "nemotron":
-            log(f"Starting Nemotron worker '{NEMOTRON_MODEL_NAME}' (CUDA)...")
-            started = time.perf_counter()
-            try:
-                parakeet_model = NemotronClient()  # ponytail: reuses the primary-model slot; it is the same role
-            except Exception as exc:
-                set_status("error")
-                log(f"Could not start Nemotron: {exc}")
-                log("- Fallback: activate Parakeet in the Voice Engine tab.")
-                raise RuntimeError(f"Nemotron initialization failed: {exc}") from exc
-            log(f"Nemotron worker ready ({time.perf_counter() - started:.2f}s).")
-            set_status("idle")
             return parakeet_model
 
         configure_cuda_dll_search()
