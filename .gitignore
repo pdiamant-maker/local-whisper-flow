@@ -21,6 +21,8 @@ local_flow_launcher.pyw
 # Per-machine state and local tooling
 settings.json
 .venv/
+.venv-nemo/
+nemotron_worker.log
 .obsidian/
 Screenshot*.png
 
