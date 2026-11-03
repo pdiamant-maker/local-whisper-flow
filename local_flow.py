@@ -2244,11 +2244,13 @@ Clean final statement:"""
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
+        "think": False,  # thinking models (Qwen 3.x) otherwise dump their reasoning as the answer
         "keep_alive": OLLAMA_KEEP_ALIVE,
         "options": {
             "temperature": 0.1,
             "top_p": 0.9,
-            "num_predict": OLLAMA_NUM_PREDICT,
+            # ~4 chars/token; 2x headroom so long dictations are never cut off mid-sentence
+            "num_predict": max(OLLAMA_NUM_PREDICT, len(raw_text) // 2),
         },
     }
 
@@ -2372,6 +2374,7 @@ def warm_ollama_model() -> None:
         "model": OLLAMA_MODEL,
         "prompt": "Reply with OK.",
         "stream": False,
+        "think": False,
         "keep_alive": OLLAMA_KEEP_ALIVE,
         "options": {
             "temperature": 0.0,
