@@ -355,7 +355,8 @@ recorded_chunks: list[np.ndarray] = []
 whisper_model: Optional["FasterWhisperModel"] = None
 parakeet_model = None
 canary_model = None
-canary_failed = False  # en_de: once Canary/LID fails to load, stay on Parakeet v3
+canary_failed_at = 0.0  # en_de: last Canary/LID failure; short clips use Parakeet v3 for CANARY_RETRY_SECONDS after it
+CANARY_RETRY_SECONDS = 60  # one transient error (e.g. CUDA OOM) used to disable Canary until restart
 last_stt_model = ""  # STT model that produced the latest final transcript (for history)
 model_load_lock = threading.Lock()
 listener: Optional[keyboard.Listener] = None
@@ -1989,7 +1990,7 @@ def load_canary_model():
 
 def warm_en_de_models() -> None:
     """en_de mode: load + warm Canary and the Whisper LID model. Never raises."""
-    global canary_failed
+    global canary_failed_at
     try:
         started = time.perf_counter()
         audio = np.zeros(SAMPLE_RATE, dtype=np.float32)
@@ -1997,7 +1998,7 @@ def warm_en_de_models() -> None:
         load_whisper_model().detect_language(audio)
         log(f"Canary + LID warm-up ({time.perf_counter() - started:.2f}s).")
     except Exception as exc:
-        canary_failed = True
+        canary_failed_at = time.time()
         log(f"Canary/LID unavailable, short clips will use Parakeet v3: {exc}")
 
 
@@ -2011,10 +2012,10 @@ def detect_en_de(audio: np.ndarray) -> tuple[str, float, float]:
 
 def transcribe_short_clip(audio: np.ndarray) -> Optional[str]:
     """en_de mode: LID + Canary for clips < SHORT_CLIP_SECONDS. None = use Parakeet v3."""
-    global canary_failed, last_stt_model
+    global canary_failed_at, last_stt_model
 
     seconds = len(audio) / SAMPLE_RATE
-    if canary_failed or game_mode_active or seconds >= SHORT_CLIP_SECONDS:
+    if time.time() - canary_failed_at < CANARY_RETRY_SECONDS or game_mode_active or seconds >= SHORT_CLIP_SECONDS:
         return None
     try:
         started = time.perf_counter()
@@ -2023,7 +2024,7 @@ def transcribe_short_clip(audio: np.ndarray) -> Optional[str]:
     except Exception as exc:
         if game_mode_active:  # models were released mid-clip; not a real failure
             return None
-        canary_failed = True
+        canary_failed_at = time.time()
         log(f"Short-clip Canary path failed, falling back to Parakeet v3: {exc}")
         return None
     last_stt_model = CANARY_MODEL_NAME
