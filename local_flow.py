@@ -110,6 +110,11 @@ GAME_MODE_IGNORE_EXES = {  # full-screen apps that are not games (lowercase)
     "vlc.exe", "mpc-hc64.exe", "mpv.exe", "potplayermini64.exe", "teams.exe", "ms-teams.exe",
     "zoom.exe", "powerpnt.exe", "applicationframehost.exe", "pythonw.exe", "python.exe",
     "claude.exe", "code.exe", "windowsterminal.exe",
+    # lock screen: its process never exits, so Game mode used to stick on all day
+    "lockapp.exe", "logonui.exe", "snippingtool.exe", "screenclippinghost.exe",
+    "searchhost.exe", "startmenuexperiencehost.exe", "shellexperiencehost.exe",
+    "excel.exe", "winword.exe", "outlook.exe", "olk.exe", "onenote.exe", "notepad.exe",
+    "powershell.exe", "pwsh.exe", "cmd.exe", "steamwebhelper.exe",
 }
 SHORT_CLIP_SECONDS = 3.0  # en_de mode: v3 mangles clips shorter than this (outputs Spanish/Cyrillic)
 LID_MIN_DE_PROB = 0.3  # real German short clips scored 0.48-0.85; an unsure English clip scored 0.05
@@ -2139,6 +2144,25 @@ def write_temp_wav() -> tuple[Path, float]:
     return wav_path, duration
 
 
+# Parakeet's attention breaks on long input (failed at 11.5 min, worked at 5.2 min).
+PARAKEET_MAX_SECONDS = 300
+
+
+def split_long_audio(audio: np.ndarray, sample_rate: int, max_seconds: float = PARAKEET_MAX_SECONDS) -> list:
+    """Cut audio into pieces <= max_seconds, each cut at the quietest 0.1 s of the window's last 10 s."""
+    max_len, win, search = int(max_seconds * sample_rate), int(0.1 * sample_rate), 10 * sample_rate
+    chunks = []
+    while len(audio) > max_len:
+        tail = audio[max_len - search:max_len]
+        tail = tail.mean(axis=1) if tail.ndim > 1 else tail
+        energy = (tail[: len(tail) // win * win].reshape(-1, win) ** 2).sum(axis=1)
+        cut = max_len - search + int(energy.argmin()) * win + win // 2
+        chunks.append(audio[:cut])
+        audio = audio[cut:]
+    chunks.append(audio)
+    return chunks
+
+
 def transcribe_audio(source, quiet: bool = False) -> str:
     """Transcribe a WAV path or a float32 numpy array with the configured STT engine.
 
@@ -2161,7 +2185,8 @@ def transcribe_audio(source, quiet: bool = False) -> str:
                     return short_text
             if not quiet:
                 last_stt_model = primary_stt_name()
-            text = str(model.recognize(audio, sample_rate=sample_rate)).strip()
+            chunks = split_long_audio(audio, sample_rate)
+            text = " ".join(str(model.recognize(c, sample_rate=sample_rate)).strip() for c in chunks).strip()
         except Exception as exc:
             log(f"{STT_ENGINE.capitalize()} transcription failed: {exc}")
             raise
@@ -2473,7 +2498,11 @@ def process_recording() -> None:
         log(f"Raw transcript ({transcribe_seconds:.2f}s): {raw_text}")
 
         stage_started = time.perf_counter()
-        clean_text = refine_with_ollama(raw_text)
+        try:
+            clean_text = refine_with_ollama(raw_text)
+        except Exception as exc:  # never lose a dictation because cleanup failed
+            log(f"Cleanup failed ({exc}); pasting raw transcript instead.")
+            clean_text = raw_text
         ollama_seconds = time.perf_counter() - stage_started
 
         if not clean_text:
